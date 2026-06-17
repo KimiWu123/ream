@@ -16,6 +16,7 @@ use ream::{
         Cli, Commands,
         account_manager::AccountManagerConfig,
         beacon_node::BeaconNodeConfig,
+        da_node::DaNodeConfig,
         generate_private_key::GeneratePrivateKeyConfig,
         generate_validator_registry::run_generate_validator_registry,
         import_keystores::{load_keystore_directory, load_password_from_config, process_password},
@@ -163,6 +164,9 @@ fn main() {
             let ream_db =
                 ReamDB::new(ream_directory.clone()).expect("unable to init Ream Database");
             executor_clone.spawn(async move { run_beacon_node(*config, executor, ream_db).await })
+        }
+        Commands::DaNode(config) => {
+            executor_clone.spawn(async move { run_da_node(*config, executor).await })
         }
         Commands::ValidatorNode(config) => {
             executor_clone.spawn(async move { run_validator_node(*config, executor).await })
@@ -616,6 +620,14 @@ pub async fn run_beacon_node(config: BeaconNodeConfig, executor: ReamExecutor, r
             info!("Network future completed!");
         },
     }
+}
+
+/// Runs the da node.
+pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor) {
+    info!(
+        "starting up da node on {}:{}",
+        config.http_address, config.http_port
+    );
 }
 
 /// Runs the validator node.
