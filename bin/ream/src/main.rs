@@ -48,6 +48,7 @@ use ream_consensus_misc::{
     },
     misc::compute_epoch_at_slot,
 };
+use ream_da::store::DaFileStore;
 use ream_events_beacon::BeaconEvent;
 use ream_execution_engine::ExecutionEngine;
 use ream_executor::ReamExecutor;
@@ -166,7 +167,8 @@ fn main() {
             executor_clone.spawn(async move { run_beacon_node(*config, executor, ream_db).await })
         }
         Commands::DaNode(config) => {
-            executor_clone.spawn(async move { run_da_node(*config, executor).await })
+            executor_clone
+                .spawn(async move { run_da_node(*config, executor, ream_directory).await })
         }
         Commands::ValidatorNode(config) => {
             executor_clone.spawn(async move { run_validator_node(*config, executor).await })
@@ -623,11 +625,17 @@ pub async fn run_beacon_node(config: BeaconNodeConfig, executor: ReamExecutor, r
 }
 
 /// Runs the da node.
-pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor) {
+pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir: PathBuf) {
     info!(
         "starting up da node on {}:{}",
         config.http_address, config.http_port
     );
+
+    // Filesystem-backed store, rooted at the node's data directory.
+    let store = Arc::new(DaFileStore::new(data_dir));
+
+    // TODO: verifier, http api, p2p network(?)
+    todo!();
 }
 
 /// Runs the validator node.
