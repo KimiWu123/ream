@@ -1,6 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::RwLock};
-
-use crate::{column::DaColumn, error::DaStoreError, id::DaColumnId};
+use crate::{column::VerifiedColumn, error::DaStoreError, id::DaColumnId};
 
 /// Outcome of inserting a verified column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,45 +10,25 @@ pub enum InsertOutcome {
     Duplicated,
 }
 
-/// File-backed DA store.
+/// Read-only storage handle.
 ///
-/// Each verified column is persisted as its own file under `root`, so the
-/// filesystem is the source of truth: reads and writes go straight to disk and
-/// there is no in-memory copy of the column set. The store is shared (behind an
-/// `Arc`) between the verification writer and the read-only serving path, so
-/// every method takes `&self`.
-pub struct DaFileStore {
-    /// Root directory holding one file per stored column, typically derived
-    /// from the CLI `--data-dir`. Created lazily on first write.
-    root: PathBuf,
-
-    index: RwLock<HashMap<DaColumnId, u64>>,
+/// This is the only storage capability handed to the local API and to P2P
+/// serving. Serving does not re-verify on the output path because the store
+/// only ever contains verified data.
+pub trait DaReadStore: Send + Sync {
+    fn get(&self, id: &DaColumnId) -> Result<Option<VerifiedColumn>, DaStoreError>;
 }
 
-impl DaFileStore {
-    /// Create a store rooted at `root`.
+/// Write-capable storage handle.
+///
+/// Handed to the verification service only. Accepting [`VerifiedColumn`] (not
+/// candidates) makes "unverified data is never stored" a type-level rule.
+pub trait DaWriteStore: DaReadStore {
+    /// Store a verified column.
     ///
-    /// There is intentionally no `Default`: a file store without a real
-    /// directory would silently write to the current path, so the directory
-    /// must be supplied explicitly.
-    pub fn new(root: PathBuf) -> Self {
-        Self {
-            root,
-            index: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Persist a verified column, reporting whether it was newly written or an
-    /// idempotent duplicate.
-    pub fn put(&self, _column: DaColumn) -> Result<InsertOutcome, DaStoreError> {
-        todo!()
-    }
-
-    /// Fetch a stored column by id.
-    ///
-    /// `Ok(None)` means "not present here" — a normal answer for a serving
-    /// node. `Err` is reserved for actual storage failures (I/O, corruption).
-    pub fn get(&self, _id: &DaColumnId) -> Result<Option<DaColumn>, DaStoreError> {
-        todo!()
-    }
+    /// Inserting identical content twice is not allowed. Inserting different
+    /// content under an existing identifier returns
+    /// [`DaStoreError::DuplicateConflict`] and keeps the existing value:
+    /// storage never silently overwrites a verified column.
+    fn put(&self, column: VerifiedColumn) -> Result<InsertOutcome, DaStoreError>;
 }

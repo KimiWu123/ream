@@ -14,6 +14,7 @@ members = [
     "crates/common/consensus/lean",
     "crates/common/consensus/misc",
     "crates/common/da",
+    "crates/common/da_node",
     "crates/common/events/beacon",
     "crates/common/execution/engine",
     "crates/common/execution/rpc_types",
@@ -154,6 +155,7 @@ ream-consensus-beacon = { path = "crates/common/consensus/beacon" }
 ream-consensus-lean = { path = "crates/common/consensus/lean", default-features = false }
 ream-consensus-misc = { path = "crates/common/consensus/misc", default-features = false }
 ream-da = { path = "crates/common/da" }
+ream-da-node = { path = "crates/common/da_node" }
 ream-discv5 = { path = "crates/networking/discv5" }
 ream-events-beacon = { path = "crates/common/events/beacon" }
 ream-execution-engine = { path = "crates/common/execution/engine" }

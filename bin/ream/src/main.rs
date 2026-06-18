@@ -48,7 +48,7 @@ use ream_consensus_misc::{
     },
     misc::compute_epoch_at_slot,
 };
-use ream_da::store::DaFileStore;
+use ream_da_node::{service::DaVerificationService, store::DaFileStore, verifier::KzgVerifier};
 use ream_events_beacon::BeaconEvent;
 use ream_execution_engine::ExecutionEngine;
 use ream_executor::ReamExecutor;
@@ -103,7 +103,10 @@ use ream_validator_lean::{
 };
 use ssz_types::VariableList;
 use tokio::{
-    sync::{broadcast, mpsc::unbounded_channel},
+    sync::{
+        broadcast,
+        mpsc::{self, unbounded_channel},
+    },
     time::{self, Instant},
 };
 use tracing::{Instrument, error, info};
@@ -166,10 +169,8 @@ fn main() {
                 ReamDB::new(ream_directory.clone()).expect("unable to init Ream Database");
             executor_clone.spawn(async move { run_beacon_node(*config, executor, ream_db).await })
         }
-        Commands::DaNode(config) => {
-            executor_clone
-                .spawn(async move { run_da_node(*config, executor, ream_directory).await })
-        }
+        Commands::DaNode(config) => executor_clone
+            .spawn(async move { run_da_node(*config, executor, ream_directory).await }),
         Commands::ValidatorNode(config) => {
             executor_clone.spawn(async move { run_validator_node(*config, executor).await })
         }
@@ -633,9 +634,13 @@ pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir:
 
     // Filesystem-backed store, rooted at the node's data directory.
     let store = Arc::new(DaFileStore::new(data_dir));
+    let verifier = Arc::new(KzgVerifier::default());
+    // TODO use constant instead of palin number
+    let (_, rx) = mpsc::channel(100);
+    let service = DaVerificationService::new(rx, verifier.clone(), store.clone(), executor);
 
-    // TODO: verifier, http api, p2p network(?)
-    todo!();
+    service.run().await
+    // TODO: p2p network
 }
 
 /// Runs the validator node.
