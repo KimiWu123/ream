@@ -636,7 +636,7 @@ pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir:
     let store = Arc::new(DaFileStore::new(data_dir));
     let verifier = Arc::new(KzgVerifier::default());
     // TODO use constant instead of palin number
-    let (_, rx) = mpsc::channel(100);
+    let (_tx, rx) = mpsc::channel(100);
     let service = DaVerificationService::new(rx, verifier.clone(), store.clone(), executor);
 
     service.run().await
