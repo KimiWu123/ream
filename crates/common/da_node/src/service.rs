@@ -12,9 +12,9 @@ pub enum DaWorkItem {
 
 pub struct DaVerificationService {
     receiver: mpsc::Receiver<DaWorkItem>,
-    verifier: Arc<dyn DaVerifier>,
-    store: Arc<dyn DaWriteStore>,
-    executor: ReamExecutor,
+    _verifier: Arc<dyn DaVerifier>,
+    _store: Arc<dyn DaWriteStore>,
+    _executor: ReamExecutor,
 }
 
 impl DaVerificationService {
@@ -26,9 +26,9 @@ impl DaVerificationService {
     ) -> Self {
         Self {
             receiver,
-            verifier,
-            store,
-            executor,
+            _verifier: verifier,
+            _store: store,
+            _executor: executor,
         }
     }
     pub async fn run(mut self) {

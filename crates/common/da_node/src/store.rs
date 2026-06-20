@@ -17,9 +17,9 @@ use ream_da::{
 pub struct DaFileStore {
     /// Root directory holding one file per stored column, typically derived
     /// from the CLI `--data-dir`. Created lazily on first write.
-    root: PathBuf,
+    _root: PathBuf,
 
-    index: RwLock<HashMap<DaColumnId, u64>>,
+    _index: RwLock<HashMap<DaColumnId, u64>>,
     // TODO add a cache, to avoid read from files everytime.
 }
 
@@ -31,8 +31,8 @@ impl DaFileStore {
     /// must be supplied explicitly.
     pub fn new(root: PathBuf) -> Self {
         Self {
-            root,
-            index: RwLock::new(HashMap::new()),
+            _root: root,
+            _index: RwLock::new(HashMap::new()),
         }
     }
 }
