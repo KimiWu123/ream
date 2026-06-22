@@ -113,6 +113,7 @@ use tracing::{Instrument, error, info};
 use tracing_subscriber::EnvFilter;
 
 pub const APP_NAME: &str = "ream";
+const DA_VERIFICATION_QUEUE_CAPACITY: usize = 100;
 const DEFAULT_QUIET_LOG_TARGETS: &str = "libp2p_gossipsub::behaviour=error";
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
@@ -635,8 +636,7 @@ pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir:
     // Filesystem-backed store, rooted at the node's data directory.
     let store = Arc::new(DaFileStore::new(data_dir).expect("failed to open DA store"));
     let verifier = Arc::new(KzgVerifier::default());
-    // TODO use constant instead of palin number
-    let (_tx, rx) = mpsc::channel(100);
+    let (_tx, rx) = mpsc::channel(DA_VERIFICATION_QUEUE_CAPACITY);
     let service = DaVerificationService::new(rx, verifier.clone(), store.clone(), executor);
 
     service.run().await
