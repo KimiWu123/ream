@@ -69,9 +69,9 @@ impl DaFileStore {
     /// earlier run become available again. A missing `root` is not an error —
     /// it yields an empty store that creates the directory on its first write.
     /// Leftover `*.tmp` files from an interrupted write are removed.
-    pub fn new(root: PathBuf) -> Result<Self, DaStoreError> {
+    pub fn new(da_root: PathBuf) -> Result<Self, DaStoreError> {
         let store = Self {
-            root,
+            root: da_root,
             index: RwLock::new(HashMap::new()),
         };
         store.rebuild_index()?;
@@ -80,13 +80,13 @@ impl DaFileStore {
 
     /// Path of the file backing `(id, slot)`.
     ///
-    /// The name encodes block root, column index and slot, so the index can be
-    /// rebuilt purely by scanning the directory.
+    /// The name is `{slot:08}_{index:03}_{block_root:x}.ssz`
+    /// rebuild the index from a directory scan.
     fn column_path(&self, id: &DaColumnId, slot: u64) -> PathBuf {
         let block_root = id.block_root();
         let index = id.index();
         self.root.join(format!(
-            "{block_root:x}_{index}_{slot}.{COLUMN_FILE_EXTENSION}"
+            "{slot:08}_{index:03}_{block_root:x}.{COLUMN_FILE_EXTENSION}"
         ))
     }
 
@@ -140,15 +140,16 @@ impl DaFileStore {
         Ok(())
     }
 
-    /// Parse a `{block_root:x}_{index}_{slot}.ssz` file name back into its id and
-    /// slot, the inverse of [`DaFileStore::column_path`]. Returns `None` for any
-    /// name that does not match exactly, so unrelated files are simply skipped.
+    /// Parse a `{slot:08}_{index:03}_{block_root:x}.ssz` file name back into its
+    /// id and slot, the inverse of [`DaFileStore::column_path`]. Returns `None`
+    /// for any name that does not match exactly, so unrelated files are simply
+    /// skipped.
     fn parse_column_file_name(name: &str) -> Option<(DaColumnId, u64)> {
         let stem = name.strip_suffix(&format!(".{COLUMN_FILE_EXTENSION}"))?;
         let mut parts = stem.split('_');
-        let block_root = B256::from_str(parts.next()?).ok()?;
-        let index = parts.next()?.parse::<u64>().ok()?;
         let slot = parts.next()?.parse::<u64>().ok()?;
+        let index = parts.next()?.parse::<u64>().ok()?;
+        let block_root = B256::from_str(parts.next()?).ok()?;
         // Reject names carrying extra `_`-separated fields we never emit.
         if parts.next().is_some() {
             return None;
