@@ -11,32 +11,54 @@ use alloy_primitives::B256;
 use ream_da::{
     column::{DaContext, DaPayload, VerifiedColumn},
     error::DaStoreError,
-    id::DaColumnId,
+    id::{DaColumnId, NUMBER_OF_COLUMNS},
     store::{DaReadStore, DaWriteStore, InsertOutcome},
 };
+use tracing::{debug, info, trace, warn};
 
 /// Extension of a committed column file. Temp files use `.tmp` instead, so the
 /// two are easy to tell apart while scanning the directory.
 const COLUMN_FILE_EXTENSION: &str = "ssz";
 
+/// Per-block index entry: the block's slot, plus a 128-bit bitmap marking which
+/// column indices are stored for it (bit `i` set ⇔ column `i` present).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlockEntry {
+    slot: u64,
+    columns: u128,
+}
+
+/// Bit mask selecting `column_index` within a block's 128-column presence
+/// bitmap. `column_index` is always `< NUMBER_OF_COLUMNS` for a valid id, so the
+/// shift never exceeds the width of `u128`.
+fn column_bit(column_index: u64) -> u128 {
+    debug_assert!(column_index < NUMBER_OF_COLUMNS);
+    1u128 << column_index
+}
+
 /// File-backed DA store.
 ///
 /// Each verified column is persisted as its own file under `root`, so the
 /// filesystem is the source of truth for the column bytes — there is no
-/// in-memory copy of the payloads. A small in-memory index maps every stored id
-/// to its slot so reads can locate the backing file from an id alone; it holds
-/// only metadata and is rebuilt from the directory by [`DaFileStore::new`].
+/// in-memory copy of the payloads. A small in-memory index maps each block root
+/// to its slot and the set of columns stored for it, so reads can locate the
+/// backing file and check presence from an id alone; it holds only metadata and
+/// is rebuilt from the directory by [`DaFileStore::new`].
 pub struct DaFileStore {
     /// Root directory holding one file per stored column, typically derived
     /// from the CLI `--data-dir`. Created lazily on first write.
     root: PathBuf,
 
-    /// In-memory index from id to the slot recorded for that column. Lets
-    /// `get` recover the slot — and therefore the file name — from an id
-    /// alone, and keeps existence checks off the filesystem. Rebuilt by
-    /// scanning the directory in [`DaFileStore::new`].
-    index: RwLock<HashMap<DaColumnId, u64>>,
+    /// In-memory index from block root to its [`BlockEntry`] (slot + column
+    /// bitmap). Lets `get` recover the slot — and therefore the file name — and
+    /// check column presence from an id alone, without touching the filesystem.
+    /// Rebuilt by scanning the directory in [`DaFileStore::new`].
+    ///
+    /// Sized per block: over the ~18-day retention window
+    /// (4096 epochs × 32 slots) that is at most ~131k entries
+    index: RwLock<HashMap<B256, BlockEntry>>,
     // TODO add a payload cache, to avoid reading from files everytime.
+    //      problem: it'll occupy a lot of memory size, we should keep cache short and up-to-date
 }
 
 impl DaFileStore {
@@ -71,14 +93,19 @@ impl DaFileStore {
     /// Scan `root` and populate the index from the column files present,
     /// deleting any stray temp files left behind by an interrupted write.
     fn rebuild_index(&self) -> Result<(), DaStoreError> {
+        let root = self.root.display();
         let entries = match fs::read_dir(&self.root) {
             Ok(entries) => entries,
             // No directory yet means nothing has been stored, which is normal.
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                debug!("no DA store directory at {root} yet; starting with an empty index");
+                return Ok(());
+            }
             Err(err) => return Err(err.into()),
         };
 
         let mut index = self.index_write();
+        let mut column_files = 0u64;
         for entry in entries {
             let path = entry?.path();
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -87,6 +114,10 @@ impl DaFileStore {
 
             // A half-written file from a crashed `put` is never trustworthy, remove it.
             if path.extension().and_then(|ext| ext.to_str()) == Some("tmp") {
+                debug!(
+                    "removing leftover temp file from an interrupted write: {}",
+                    path.display()
+                );
                 let _ = fs::remove_file(&path);
                 continue;
             }
@@ -94,9 +125,18 @@ impl DaFileStore {
             // Skip anything we did not write (unexpected names, stray files):
             // startup must not fail on directory clutter.
             if let Some((id, slot)) = Self::parse_column_file_name(name) {
-                index.insert(id, slot);
+                index
+                    .entry(id.block_root())
+                    .or_insert(BlockEntry { slot, columns: 0 })
+                    .columns |= column_bit(id.index());
+                column_files += 1;
             }
         }
+
+        info!(
+            "loaded DA store index from {root}: {column_files} column files across {} blocks",
+            index.len()
+        );
         Ok(())
     }
 
@@ -119,14 +159,14 @@ impl DaFileStore {
 
     /// Read guard over the index, recovering from a poisoned lock instead of
     /// panicking (a poisoned in-memory index is still readable).
-    fn index_read(&self) -> RwLockReadGuard<'_, HashMap<DaColumnId, u64>> {
+    fn index_read(&self) -> RwLockReadGuard<'_, HashMap<B256, BlockEntry>> {
         self.index
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Write guard over the index, recovering from a poisoned lock.
-    fn index_write(&self) -> RwLockWriteGuard<'_, HashMap<DaColumnId, u64>> {
+    fn index_write(&self) -> RwLockWriteGuard<'_, HashMap<B256, BlockEntry>> {
         self.index
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -140,13 +180,30 @@ impl DaReadStore for DaFileStore {
     /// — and also covers an index entry whose backing file has since vanished.
     /// `Err` is reserved for actual storage failures (I/O, corruption).
     fn get(&self, id: &DaColumnId) -> Result<Option<VerifiedColumn>, DaStoreError> {
-        let Some(slot) = self.index_read().get(id).copied() else {
+        // An out-of-range column index can never have been stored, and must not
+        // be shifted into the bitmap; treat it as absent.
+        if id.index() >= NUMBER_OF_COLUMNS {
+            return Ok(None);
+        }
+
+        // Locate the block and confirm this column's bit is set, all in memory.
+        let Some(entry) = self.index_read().get(&id.block_root()).copied() else {
             return Ok(None);
         };
+        if entry.columns & column_bit(id.index()) == 0 {
+            return Ok(None);
+        }
 
-        let bytes = match fs::read(self.column_path(id, slot)) {
+        let path = self.column_path(id, entry.slot);
+        let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                warn!(
+                    "index references a column whose file is missing: {}",
+                    path.display()
+                );
+                return Ok(None);
+            }
             Err(err) => return Err(err.into()),
         };
 
@@ -154,7 +211,7 @@ impl DaReadStore for DaFileStore {
         // reconstructing it as a `VerifiedColumn` upholds the invariant.
         Ok(Some(VerifiedColumn::new_unchecked(
             *id,
-            DaContext { slot },
+            DaContext { slot: entry.slot },
             DaPayload::new(bytes),
         )))
     }
@@ -165,15 +222,22 @@ impl DaWriteStore for DaFileStore {
     ///
     /// Storage is keyed by id. Once a column is stored for an id, any later put
     /// for that id is an idempotent [`InsertOutcome::Duplicated`]: the incoming
-    /// column is ignored — whatever its slot or bytes — and the stored one is
-    /// kept, never overwritten and never leaving an orphaned file. A new column
-    /// is written atomically (temp file + `sync_all` + `rename`), so a crash
-    /// can never leave a half-written file that a reader would trust.
+    /// column is ignored and the stored one is kept. A new column is written
+    /// with temp-file + `sync_all` + `rename`, so readers never trust a
+    /// half-written file.
     fn put(&self, column: VerifiedColumn) -> Result<InsertOutcome, DaStoreError> {
         let id = column.id();
         let slot = column.context().slot;
+        let block_root = id.block_root();
+        let column_index = id.index();
 
-        if self.index_read().contains_key(&id) {
+        // Already stored (this column's bit is set for its block)? Idempotent.
+        let already_stored = self
+            .index_read()
+            .get(&block_root)
+            .is_some_and(|entry| entry.columns & column_bit(column_index) != 0);
+        if already_stored {
+            trace!("ignoring duplicate column index={column_index} block_root={block_root:x}");
             return Ok(InsertOutcome::Duplicated);
         }
 
@@ -187,7 +251,12 @@ impl DaWriteStore for DaFileStore {
         file.sync_all()?;
         fs::rename(&tmp_path, &path)?;
 
-        self.index_write().insert(id, slot);
+        self.index_write()
+            .entry(block_root)
+            .or_insert(BlockEntry { slot, columns: 0 })
+            .columns |= column_bit(column_index);
+
+        debug!("stored column index={column_index} slot={slot} block_root={block_root:x}");
         Ok(InsertOutcome::Inserted)
     }
 }
@@ -207,7 +276,7 @@ mod tests {
         store::{DaReadStore, DaWriteStore, InsertOutcome},
     };
 
-    use super::DaFileStore;
+    use super::{BlockEntry, DaFileStore};
 
     /// A unique temp directory per call, so tests don't collide when run in
     /// parallel. No `tempfile` dependency: the path is process- and
@@ -234,9 +303,41 @@ mod tests {
         let outcome = store.put(column).expect("put succeeds");
 
         assert_eq!(outcome, InsertOutcome::Inserted);
-        assert_eq!(store.index_read().get(&id), Some(&42));
+        // One per-block entry: slot 42, with only column 3 marked present.
+        assert_eq!(
+            store.index_read().get(&id.block_root()).copied(),
+            Some(BlockEntry {
+                slot: 42,
+                columns: 1u128 << id.index(),
+            }),
+        );
         let on_disk = fs::read(store.column_path(&id, 42)).expect("column file written");
         assert_eq!(on_disk.as_slice(), b"payload-bytes");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn put_records_multiple_columns_of_a_block_in_one_entry() {
+        let root = temp_root();
+        let store = DaFileStore::new(root.clone()).expect("open store");
+        let block_root = B256::repeat_byte(4);
+
+        store
+            .put(sample_column(block_root, 2, 30, b"col-2"))
+            .expect("put column 2");
+        store
+            .put(sample_column(block_root, 5, 30, b"col-5"))
+            .expect("put column 5");
+
+        // Both columns share a single per-block entry, with both bits set.
+        assert_eq!(
+            store.index_read().get(&block_root).copied(),
+            Some(BlockEntry {
+                slot: 30,
+                columns: (1u128 << 2) | (1u128 << 5),
+            }),
+        );
 
         fs::remove_dir_all(&root).ok();
     }
