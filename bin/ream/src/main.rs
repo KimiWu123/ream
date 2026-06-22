@@ -633,7 +633,7 @@ pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir:
     );
 
     // Filesystem-backed store, rooted at the node's data directory.
-    let store = Arc::new(DaFileStore::new(data_dir));
+    let store = Arc::new(DaFileStore::new(data_dir).expect("failed to open DA store"));
     let verifier = Arc::new(KzgVerifier::default());
     // TODO use constant instead of palin number
     let (_tx, rx) = mpsc::channel(100);
