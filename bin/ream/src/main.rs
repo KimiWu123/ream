@@ -106,10 +106,7 @@ use ream_validator_lean::{
 };
 use ssz_types::VariableList;
 use tokio::{
-    sync::{
-        broadcast,
-        mpsc::{self, unbounded_channel},
-    },
+    sync::{broadcast, mpsc::unbounded_channel},
     time::{self, Instant},
 };
 use tracing::{Instrument, error, info};
