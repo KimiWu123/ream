@@ -9,12 +9,7 @@ use ream_executor::ReamExecutor;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
-/// Work delivered to the verification service over the ingest channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DaWorkItem {
-    /// A candidate column to verify and, if valid, store.
-    Candidate(CandidateColumn),
-}
+use crate::ingestion::DaWorkItem;
 
 /// Runs the DA verification pipeline: drain candidate columns from the ingest
 /// channel, verify each one, and persist those that pass.
