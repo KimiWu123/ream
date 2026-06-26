@@ -9,7 +9,7 @@ use ream_executor::ReamExecutor;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
-use crate::ingest::DaWorkItem;
+use crate::ingest::{DaWorkItem, RetentionHint};
 
 /// Runs the DA verification pipeline: drain candidate columns from the ingest
 /// channel, verify each one, and persist those that pass.
@@ -49,9 +49,30 @@ impl DaVerificationService {
         while let Some(item) = self.receiver.recv().await {
             match item {
                 DaWorkItem::Candidate(candidate) => self.process_candidate(candidate).await,
+                DaWorkItem::Retention(hint) => self.process_retention(hint).await,
             }
         }
         info!("DA verification service stopped: ingestion queue closed");
+    }
+
+    /// Apply a beacon-issued retention boundary: prune every stored column whose
+    /// slot is below `hint.slot`.
+    async fn process_retention(&self, hint: RetentionHint) {
+        let store = self.store.clone();
+        let boundary = hint.slot;
+        match self
+            .executor
+            .spawn_blocking(move || store.prune_below_slot(boundary))
+            .await
+        {
+            Ok(Ok(count)) => {
+                if count > 0 {
+                    info!("retention pruned {count} column files below slot {boundary}");
+                }
+            }
+            Ok(Err(err)) => error!("retention prune failed: {err}"),
+            Err(err) => error!("retention prune worker panicked or was cancelled: {err}"),
+        }
     }
 
     /// Verify a single candidate and, if it passes, persist it.
