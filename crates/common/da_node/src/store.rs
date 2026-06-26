@@ -488,4 +488,117 @@ mod tests {
 
         fs::remove_dir_all(&root).ok();
     }
+
+    #[test]
+    fn prune_below_slot_removes_old_keeps_recent() {
+        let root = temp_root();
+        let store = DaFileStore::new(root.clone()).expect("open store");
+
+        // Old block at slot 10 (two columns); recent block at slot 20 (one).
+        let old = B256::repeat_byte(1);
+        let recent = B256::repeat_byte(2);
+        store.put(sample_column(old, 0, 10, b"old-0")).expect("put");
+        store.put(sample_column(old, 4, 10, b"old-4")).expect("put");
+        store
+            .put(sample_column(recent, 1, 20, b"recent-1"))
+            .expect("put");
+
+        // Cutoff 15: slot 10 < 15 is pruned, slot 20 is kept.
+        let removed = store.prune_below_slot(15).expect("prune");
+        assert_eq!(removed, 2, "both old column files are removed");
+
+        // Old block: index entry gone, files gone, get -> None.
+        assert!(store.index_read().get(&old).is_none());
+        let old_0 = DaColumnId::new(old, 0).expect("valid index");
+        let old_4 = DaColumnId::new(old, 4).expect("valid index");
+        assert!(!store.column_path(&old_0, 10).exists());
+        assert!(!store.column_path(&old_4, 10).exists());
+        assert_eq!(store.get(&old_0).expect("get"), None);
+
+        // Recent block: untouched (index + file + get).
+        let recent_1 = DaColumnId::new(recent, 1).expect("valid index");
+        assert!(store.index_read().get(&recent).is_some());
+        assert!(store.column_path(&recent_1, 20).exists());
+        assert!(store.get(&recent_1).expect("get").is_some());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn prune_below_slot_keeps_block_exactly_at_cutoff() {
+        let root = temp_root();
+        let store = DaFileStore::new(root.clone()).expect("open store");
+        let block = B256::repeat_byte(7);
+        store
+            .put(sample_column(block, 0, 32, b"at-cutoff"))
+            .expect("put");
+
+        // slot 32 is not < 32, so a cutoff equal to the slot keeps the block.
+        assert_eq!(store.prune_below_slot(32).expect("prune"), 0);
+        assert!(store.index_read().get(&block).is_some());
+
+        // Raising the cutoff one past the slot prunes it.
+        assert_eq!(store.prune_below_slot(33).expect("prune"), 1);
+        assert!(store.index_read().get(&block).is_none());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn prune_below_slot_leaves_no_stale_index_or_availability() {
+        let root = temp_root();
+        let store = DaFileStore::new(root.clone()).expect("open store");
+        let block = B256::repeat_byte(9);
+        for index in [0u64, 5, 7] {
+            store
+                .put(sample_column(block, index, 8, b"x"))
+                .expect("put");
+        }
+        assert_eq!(
+            store
+                .availability(block)
+                .expect("availability")
+                .held_count(),
+            3
+        );
+
+        store.prune_below_slot(100).expect("prune");
+
+        // The whole entry is gone (bitmap reached 0 -> entry removed), so the
+        // bitmap never lingers claiming columns whose files were deleted.
+        assert!(store.index_read().get(&block).is_none());
+        assert_eq!(
+            store
+                .availability(block)
+                .expect("availability")
+                .held_count(),
+            0
+        );
+        for index in [0u64, 5, 7] {
+            let id = DaColumnId::new(block, index).expect("valid index");
+            assert_eq!(store.get(&id).expect("get"), None);
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn prune_below_slot_tolerates_an_already_missing_file() {
+        let root = temp_root();
+        let store = DaFileStore::new(root.clone()).expect("open store");
+        let block = B256::repeat_byte(3);
+        store.put(sample_column(block, 0, 5, b"a")).expect("put");
+        store.put(sample_column(block, 2, 5, b"b")).expect("put");
+
+        // Delete one backing file out of band; the index still references it.
+        let gone = DaColumnId::new(block, 0).expect("valid index");
+        fs::remove_file(store.column_path(&gone, 5)).expect("remove file");
+
+        // Prune still succeeds (NotFound tolerated) and clears the whole block;
+        // only the file that was still present counts toward the total.
+        assert_eq!(store.prune_below_slot(10).expect("prune"), 1);
+        assert!(store.index_read().get(&block).is_none());
+
+        fs::remove_dir_all(&root).ok();
+    }
 }
