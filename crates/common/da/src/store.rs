@@ -37,4 +37,6 @@ pub trait DaWriteStore: DaReadStore {
     /// overwritten. Otherwise the column is persisted and
     /// [`InsertOutcome::Inserted`] is returned.
     fn put(&self, column: VerifiedColumn) -> Result<InsertOutcome, DaStoreError>;
+
+    fn prune_below_slot(&self, slot: u64) -> Result<usize, DaStoreError>;
 }

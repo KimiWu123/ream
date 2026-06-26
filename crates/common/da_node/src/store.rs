@@ -12,7 +12,7 @@ use ream_da::{
     availability::DaAvailability,
     column::{DaContext, DaPayload, VerifiedColumn},
     error::DaStoreError,
-    id::{ALL_COLUMNS_MASK, DaColumnId, NUMBER_OF_COLUMNS},
+    id::{ALL_COLUMNS_MASK, DaColumnId, NUMBER_OF_COLUMNS, column_indices},
     store::{DaReadStore, DaWriteStore, InsertOutcome},
 };
 use tracing::{debug, info, trace, warn};
@@ -159,6 +159,40 @@ impl DaFileStore {
         Some((id, slot))
     }
 
+    fn remove_entries(&self, entries: &[(B256, BlockEntry)]) -> Result<usize, DaStoreError> {
+        let mut removed = 0;
+        for (block_root, entry) in entries {
+            for index in column_indices(entry.columns) {
+                let id = DaColumnId::new(*block_root, index)
+                    .expect("bitmap bit position is always < NUMBER_OF_COLUMNS");
+                match fs::remove_file(self.column_path(&id, entry.slot)) {
+                    Ok(()) => removed += 1,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err.into()),
+                }
+
+                self.clear_column(block_root, index);
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Clear `column_index`'s bit for `block_root`; once no columns remain, drop the
+    /// whole entry. Keeps the in-memory bitmap in step with the files on disk.
+    fn clear_column(&self, block_root: &B256, column_index: u64) {
+        let mut index = self.index_write();
+        let now_empty = match index.get_mut(block_root) {
+            Some(entry) => {
+                entry.columns &= !column_bit(column_index);
+                entry.columns == 0
+            }
+            None => return,
+        };
+        if now_empty {
+            index.remove(block_root);
+        }
+    }
+
     /// Read guard over the index, recovering from a poisoned lock instead of
     /// panicking (a poisoned in-memory index is still readable).
     fn index_read(&self) -> RwLockReadGuard<'_, HashMap<B256, BlockEntry>> {
@@ -271,6 +305,16 @@ impl DaWriteStore for DaFileStore {
 
         debug!("stored column index={column_index} slot={slot} block_root={block_root:x}");
         Ok(InsertOutcome::Inserted)
+    }
+
+    fn prune_below_slot(&self, slot: u64) -> Result<usize, DaStoreError> {
+        let entries = self
+            .index_read()
+            .iter()
+            .filter(|(_, entry)| entry.slot < slot)
+            .map(|(root, entry)| (*root, *entry))
+            .collect::<Vec<(B256, BlockEntry)>>();
+        self.remove_entries(&entries)
     }
 }
 

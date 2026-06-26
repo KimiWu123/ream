@@ -1,3 +1,5 @@
+use crate::id::column_indices;
+
 /// Which of a block's columns this node holds, against the set it is responsible
 /// for.
 ///
@@ -32,13 +34,7 @@ impl DaAvailability {
     ///
     /// This is the list a fetcher turns into a request for the missing columns
     pub fn missing_indices(&self) -> Vec<u64> {
-        let mut missing = self.expected & !self.held;
-        let mut indices = Vec::new();
-        while missing != 0 {
-            indices.push(u64::from(missing.trailing_zeros()));
-            missing &= missing - 1;
-        }
-        indices
+        column_indices(self.expected & !self.held)
     }
 }
 
