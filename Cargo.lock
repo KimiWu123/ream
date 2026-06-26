@@ -6866,6 +6866,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ream-rpc-da"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "alloy-primitives",
+ "ream-api-types-common",
+ "ream-da",
+ "ream-da-node",
+ "ream-rpc-common",
+ "serde",
+]
+
+[[package]]
 name = "ream-rpc-lean"
 version = "0.1.0"
 dependencies = [
