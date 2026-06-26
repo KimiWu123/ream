@@ -11,6 +11,9 @@ use crate::error::ValidationError;
 /// (<https://ethereum.github.io/consensus-specs/fulu/das-core/>).
 pub const NUMBER_OF_COLUMNS: u64 = 128;
 
+/// Bitmask for full custody, serve the full column set.
+pub const ALL_COLUMNS_MASK: u128 = u128::MAX;
+
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default,
 )]

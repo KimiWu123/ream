@@ -9,9 +9,10 @@ use std::{
 
 use alloy_primitives::B256;
 use ream_da::{
+    availability::DaAvailability,
     column::{DaContext, DaPayload, VerifiedColumn},
     error::DaStoreError,
-    id::{DaColumnId, NUMBER_OF_COLUMNS},
+    id::{ALL_COLUMNS_MASK, DaColumnId, NUMBER_OF_COLUMNS},
     store::{DaReadStore, DaWriteStore, InsertOutcome},
 };
 use tracing::{debug, info, trace, warn};
@@ -215,6 +216,17 @@ impl DaReadStore for DaFileStore {
             DaContext { slot: entry.slot },
             DaPayload::new(bytes),
         )))
+    }
+
+    fn availability(&self, block_root: B256) -> Result<DaAvailability, DaStoreError> {
+        let held = self
+            .index_read()
+            .get(&block_root)
+            .map(|e| e.columns)
+            .unwrap_or(0);
+        // Full-custody MVP: every column is expected. When custody groups land,
+        // this is where the node's actual custody set would be passed instead.
+        Ok(DaAvailability::new(held, ALL_COLUMNS_MASK))
     }
 }
 
