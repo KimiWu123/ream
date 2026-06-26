@@ -6070,6 +6070,7 @@ dependencies = [
  "ream-post-quantum-crypto",
  "ream-rpc-beacon",
  "ream-rpc-common",
+ "ream-rpc-da",
  "ream-rpc-lean",
  "ream-storage",
  "ream-sync",
