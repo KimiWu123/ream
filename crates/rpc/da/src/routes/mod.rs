@@ -1,6 +1,10 @@
 use actix_web::web::{ServiceConfig, scope};
 
-use crate::handlers::ingest::post_ingest;
+use crate::handlers::{
+    availability::get_availability,
+    column::{get_column, get_columns},
+    ingest::post_ingest,
+};
 
 /// Register every DA API route.
 ///
@@ -14,4 +18,7 @@ pub fn register_routers(config: &mut ServiceConfig) {
 /// Routes served under the `/da/v0` scope.
 fn register_v0_routes(config: &mut ServiceConfig) {
     config.service(post_ingest);
+    config.service(get_availability);
+    config.service(get_column);
+    config.service(get_columns);
 }
