@@ -21,7 +21,8 @@ ream-da-node.workspace = true
 ream-rpc-common.workspace = true
 serde.workspace = true
 
-
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true
