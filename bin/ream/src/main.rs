@@ -633,6 +633,18 @@ pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir:
         config.http_address, config.http_port
     );
 
+    // The DA RPC is a private, same-host channel to the local beacon, not a public
+    // service. Refuse to start if bound anywhere reachable beyond this
+    // machine, which would expose unauthenticated write/prune/read to the network.
+    if !config.http_address.is_loopback() {
+        error!(
+            "refusing to start DA node: http address {} is not loopback; \
+             the DA RPC must not be reachable beyond localhost",
+            config.http_address
+        );
+        return;
+    }
+
     let server_config = RpcServerConfig::new(
         config.http_address,
         config.http_port,
