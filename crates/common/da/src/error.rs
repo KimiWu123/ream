@@ -4,26 +4,26 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ValidationError {
-    #[error("column index {column_index} is outside 0..{number_of_columns}")]
+    #[error("column index {column_index} is out of range 0..{number_of_columns}")]
     InvalidColumnIndex {
         column_index: u64,
         number_of_columns: u64,
     },
 
-    #[error("payload format is incorrect: {0}")]
+    #[error("malformed column payload: {0}")]
     MalformedPayload(String),
 
-    #[error("id mismatch: expected:{expected} \n actual:{actual}")]
-    IdMismatch_ { expected: String, actual: String },
+    #[error("column id mismatch: expected {expected}, got {actual}")]
+    IdMismatch { expected: String, actual: String },
 
-    #[error("commitment is empty")]
+    #[error("column sidecar carries no commitments")]
     EmptyCommitments,
 
-    #[error("the commitment length: {count} is over max_blobs_per_block: {maximum}")]
+    #[error("too many commitments: {count} exceeds the per-block limit of {maximum}")]
     TooManyCommitments { count: usize, maximum: usize },
 
     #[error(
-        "the content of the data sidecar is inconsistent, cell: {cells}, commitment: {commitments}, proof:{proofs}"
+        "column sidecar length mismatch: {cells} cells, {commitments} commitments, {proofs} proofs"
     )]
     LengthMismatch {
         cells: usize,
@@ -31,10 +31,13 @@ pub enum ValidationError {
         proofs: usize,
     },
 
-    #[error("invalid proof")]
+    #[error("commitments inclusion proof is invalid")]
+    InvalidInclusionProof,
+
+    #[error("column proof verification failed")]
     InvalidProof,
 
-    #[error("verify failed: {0}")]
+    #[error("verifier error: {0}")]
     VerifierFailure(String),
 }
 
