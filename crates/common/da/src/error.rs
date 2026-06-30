@@ -9,6 +9,33 @@ pub enum ValidationError {
         column_index: u64,
         number_of_columns: u64,
     },
+
+    #[error("payload format is incorrect: {0}")]
+    MalformedPayload(String),
+
+    #[error("id mismatch: expected:{expected} \n actual:{actual}")]
+    IdMismatch_ { expected: String, actual: String },
+
+    #[error("commitment is empty")]
+    EmptyCommitments,
+
+    #[error("the commitment length: {count} is over max_blobs_per_block: {maximum}")]
+    TooManyCommitments { count: usize, maximum: usize },
+
+    #[error(
+        "the content of the data sidecar is inconsistent, cell: {cells}, commitment: {commitments}, proof:{proofs}"
+    )]
+    LengthMismatch {
+        cells: usize,
+        commitments: usize,
+        proofs: usize,
+    },
+
+    #[error("invalid proof")]
+    InvalidProof,
+
+    #[error("verify failed: {0}")]
+    VerifierFailure(String),
 }
 
 #[derive(Debug, Error)]
