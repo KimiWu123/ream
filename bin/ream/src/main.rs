@@ -44,7 +44,7 @@ use ream_consensus_lean::block::BlockSignatures;
 use ream_consensus_lean::{block::SignedBlock, validator::Validator};
 use ream_consensus_misc::{
     constants::{
-        beacon::{MAX_BLOBS_PER_BLOCK_ELECTRA, set_genesis_validator_root},
+        beacon::set_genesis_validator_root,
         lean::{attestation_committee_count, set_attestation_committee_count},
     },
     misc::compute_epoch_at_slot,
@@ -632,6 +632,8 @@ pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir:
         config.http_address, config.http_port
     );
 
+    set_beacon_network_spec(config.network.clone());
+
     // The DA RPC is a private, same-host channel to the local beacon, not a public
     // service. Refuse to start if bound anywhere reachable beyond this
     // machine, which would expose unauthenticated write/prune/read to the network.
@@ -652,10 +654,9 @@ pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir:
 
     // Filesystem-backed store, rooted at the node's data directory.
     let store = Arc::new(DaFileStore::new(data_dir).expect("failed to open DA store"));
-    // TODO: source `max_blobs_per_block` from the network spec once the DA node
-    // learns its network (`--network` + `set_beacon_network_spec`).
-    let max_blobs_per_block = NonZeroUsize::new(MAX_BLOBS_PER_BLOCK_ELECTRA as usize)
-        .expect("MAX_BLOBS_PER_BLOCK_ELECTRA is nonzero");
+    let max_blobs_per_block =
+        NonZeroUsize::new(beacon_network_spec().max_blobs_per_block_electra as usize)
+            .expect("network spec max_blobs_per_block must be nonzero");
     let verifier = Arc::new(KzgVerifier::new(max_blobs_per_block));
 
     // The KZG trusted setup is lazily loaded and expensive (seconds). Warm it up
