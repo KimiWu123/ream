@@ -7,7 +7,7 @@ use ream_da::{
     id::DaColumnId,
     verifier::DaVerifier,
 };
-use ream_polynomial_commitments::handlers::verify_data_column_sidecar_kzg_proofs;
+use ream_polynomial_commitments::{handlers::verify_data_column_sidecar_kzg_proofs, trusted_setup};
 use ssz::Decode;
 use tree_hash::TreeHash;
 
@@ -26,6 +26,13 @@ impl KzgVerifier {
         Self {
             max_blobs_per_block,
         }
+    }
+
+    /// Eagerly load the KZG trusted setup, which is otherwise lazily initialized
+    /// on first use at a one-time, multi-second cost. Call once at startup, off
+    /// the hot path, so the first column to arrive doesn't pay it mid-request.
+    pub fn warm_up_trusted_setup() {
+        let _ = trusted_setup::blst_settings();
     }
 
     /// Decode the opaque payload into a PeerDAS column sidecar.

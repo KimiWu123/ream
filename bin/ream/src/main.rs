@@ -657,6 +657,18 @@ pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir:
     let max_blobs_per_block = NonZeroUsize::new(MAX_BLOBS_PER_BLOCK_ELECTRA as usize)
         .expect("MAX_BLOBS_PER_BLOCK_ELECTRA is nonzero");
     let verifier = Arc::new(KzgVerifier::new(max_blobs_per_block));
+
+    // The KZG trusted setup is lazily loaded and expensive (seconds). Warm it up
+    // now, off the async workers, so the first column to arrive doesn't pay that
+    // cost mid-verification.
+    if let Err(err) = executor
+        .spawn_blocking(KzgVerifier::warm_up_trusted_setup)
+        .await
+    {
+        error!("failed to warm up KZG trusted setup: {err}");
+        return;
+    }
+
     let (ingest_handle, rx) = ingest_channel(DA_VERIFICATION_QUEUE_CAPACITY);
     let service = DaVerificationService::new(rx, verifier.clone(), store.clone(), executor.clone());
     let mut service_task = AbortOnDrop(executor.spawn(service.run()));
