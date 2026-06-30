@@ -6054,6 +6054,7 @@ dependencies = [
  "ream-consensus-misc",
  "ream-da",
  "ream-da-node",
+ "ream-da-verifier-kzg",
  "ream-discv5",
  "ream-events-beacon",
  "ream-execution-engine",

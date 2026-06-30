@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     env, fs,
     net::SocketAddr,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process,
     sync::Arc,
@@ -43,15 +44,13 @@ use ream_consensus_lean::block::BlockSignatures;
 use ream_consensus_lean::{block::SignedBlock, validator::Validator};
 use ream_consensus_misc::{
     constants::{
-        beacon::set_genesis_validator_root,
+        beacon::{MAX_BLOBS_PER_BLOCK_ELECTRA, set_genesis_validator_root},
         lean::{attestation_committee_count, set_attestation_committee_count},
     },
     misc::compute_epoch_at_slot,
 };
-use ream_da_node::{
-    ingest::ingest_channel, service::DaVerificationService, store::DaFileStore,
-    verifier::KzgVerifier,
-};
+use ream_da_node::{ingest::ingest_channel, service::DaVerificationService, store::DaFileStore};
+use ream_da_verifier_kzg::KzgVerifier;
 use ream_events_beacon::BeaconEvent;
 use ream_execution_engine::ExecutionEngine;
 use ream_executor::ReamExecutor;
@@ -653,7 +652,11 @@ pub async fn run_da_node(config: DaNodeConfig, executor: ReamExecutor, data_dir:
 
     // Filesystem-backed store, rooted at the node's data directory.
     let store = Arc::new(DaFileStore::new(data_dir).expect("failed to open DA store"));
-    let verifier = Arc::new(KzgVerifier::default());
+    // TODO: source `max_blobs_per_block` from the network spec once the DA node
+    // learns its network (`--network` + `set_beacon_network_spec`).
+    let max_blobs_per_block = NonZeroUsize::new(MAX_BLOBS_PER_BLOCK_ELECTRA as usize)
+        .expect("MAX_BLOBS_PER_BLOCK_ELECTRA is nonzero");
+    let verifier = Arc::new(KzgVerifier::new(max_blobs_per_block));
     let (ingest_handle, rx) = ingest_channel(DA_VERIFICATION_QUEUE_CAPACITY);
     let service = DaVerificationService::new(rx, verifier.clone(), store.clone(), executor.clone());
     let mut service_task = AbortOnDrop(executor.spawn(service.run()));
