@@ -123,6 +123,41 @@ async fn ingest_accepts_valid_candidate() {
 }
 
 #[actix_web::test]
+async fn ingest_full_queue_is_503() {
+    // Capacity 1 and the receiver is never drained (`_rx` just keeps the channel
+    // open), so the second submit finds the queue full — a retryable 503, not a
+    // 500.
+    let (handle, _rx) = ingest_channel(1);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(1);
+    let make_req = || {
+        test::TestRequest::post()
+            .uri("/da/v0/ingest")
+            .set_json(json!({
+                "block_root": format!("0x{root:x}"),
+                "index": 3,
+                "slot": 42,
+                "payload": "0x00",
+            }))
+            .to_request()
+    };
+
+    // First submit fills the single slot.
+    let first = test::call_service(&app, make_req()).await;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+
+    // Second finds the queue full.
+    let second = test::call_service(&app, make_req()).await;
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[actix_web::test]
 async fn ingest_rejects_out_of_range_index() {
     let (handle, _rx) = ingest_channel(8);
     let app = test::init_service(
