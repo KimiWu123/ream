@@ -64,6 +64,26 @@ impl Drop for TempStore {
 }
 
 // ---------------------------------------------------------------------------
+// /health
+// ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn health_reports_ok() {
+    // No app_data needed: the probe touches neither store nor ingest handle.
+    let app = test::init_service(App::new().configure(register_routers)).await;
+
+    let req = test::TestRequest::get()
+        .uri("/da/v0/health")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["status"].as_str(), Some("healthy"));
+    assert_eq!(body["service"].as_str(), Some("da-node"));
+}
+
+// ---------------------------------------------------------------------------
 // /ingest
 // ---------------------------------------------------------------------------
 
