@@ -41,10 +41,30 @@ impl KzgVerifier {
             .map_err(|err| ValidationError::MalformedPayload(format!("{err:?}")))
     }
 
-    /// The one cryptographically scheme-specific step: every cell matches its
-    /// commitment and proof.
-    fn verify_cells(&self, sidecar: &DataColumnSidecar) -> anyhow::Result<bool> {
-        verify_data_column_sidecar_kzg_proofs(sidecar)
+    /// Cheap structural checks, mirroring `DataColumnSidecar::verify()` but kept
+    /// separate on purpose: it returns typed `ValidationError`s (so rejections
+    /// can be counted and diagnosed) instead of a `bool`,
+    fn check_shape(&self, sidecar: &DataColumnSidecar) -> Result<(), ValidationError> {
+        // Cells, commitments, and proofs are one-per-blob, so their counts must
+        // agree and stay within the per-block blob limit.
+        let commitments = sidecar.kzg_commitments.len();
+        if commitments == 0 {
+            return Err(ValidationError::EmptyCommitments);
+        }
+        if commitments > self.max_blobs_per_block.get() {
+            return Err(ValidationError::TooManyCommitments {
+                count: commitments,
+                maximum: self.max_blobs_per_block.get(),
+            });
+        }
+        if sidecar.column.len() != commitments || sidecar.kzg_proofs.len() != commitments {
+            return Err(ValidationError::LengthMismatch {
+                cells: sidecar.column.len(),
+                commitments,
+                proofs: sidecar.kzg_proofs.len(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -67,27 +87,8 @@ impl DaVerifier for KzgVerifier {
                 ),
             });
         }
-
-        // Cheap shape checks before the expensive proof work. Cells, commitments,
-        // and proofs are one-per-blob, so their counts must agree and stay within
-        // the per-block blob limit.
-        let commitments = sidecar.kzg_commitments.len();
-        if commitments == 0 {
-            return Err(ValidationError::EmptyCommitments);
-        }
-        if commitments > self.max_blobs_per_block.get() {
-            return Err(ValidationError::TooManyCommitments {
-                count: commitments,
-                maximum: self.max_blobs_per_block.get(),
-            });
-        }
-        if sidecar.column.len() != commitments || sidecar.kzg_proofs.len() != commitments {
-            return Err(ValidationError::LengthMismatch {
-                cells: sidecar.column.len(),
-                commitments,
-                proofs: sidecar.kzg_proofs.len(),
-            });
-        }
+        // Structural well-formedness (counts, blob limit) before the costly proofs.
+        self.check_shape(&sidecar)?;
 
         // The commitments really belong to this block: a Merkle inclusion proof
         // against the signed header's body root. The sidecar checks this itself,
@@ -97,7 +98,7 @@ impl DaVerifier for KzgVerifier {
         }
 
         // The scheme-specific cryptographic step.
-        match self.verify_cells(&sidecar) {
+        match verify_data_column_sidecar_kzg_proofs(&sidecar) {
             Ok(true) => {}
             Ok(false) => return Err(ValidationError::InvalidProof),
             Err(err) => return Err(ValidationError::VerifierFailure(format!("{err:?}"))),
@@ -202,8 +203,12 @@ mod tests {
         leaves[BLOB_KZG_COMMITMENTS_INDEX as usize] = kzg_commitments.tree_hash_root();
         let tree = merkle_tree(&leaves, DATA_COLUMN_SIDECAR_KZG_PROOF_DEPTH).expect("merkle tree");
         let inclusion_proof = FixedVector::new(
-            generate_proof(&tree, BLOB_KZG_COMMITMENTS_INDEX, DATA_COLUMN_SIDECAR_KZG_PROOF_DEPTH)
-                .expect("inclusion proof"),
+            generate_proof(
+                &tree,
+                BLOB_KZG_COMMITMENTS_INDEX,
+                DATA_COLUMN_SIDECAR_KZG_PROOF_DEPTH,
+            )
+            .expect("inclusion proof"),
         )
         .expect("proof length matches depth");
 
@@ -315,5 +320,19 @@ mod tests {
             verifier().verify(candidate_of(&sidecar(0, 1))),
             Err(ValidationError::InvalidInclusionProof)
         ));
+    }
+
+    /// `ream-da` copies `NUMBER_OF_COLUMNS` so the core stays free of the beacon
+    /// crate; beacon keeps its own copy for sidecar logic. Neither may depend on
+    /// the other, so the two definitions cannot be unified in a type. This
+    /// adapter is the one crate that sees both, making it the only place that can
+    /// pin them equal — turning `id.rs`'s "MUST stay equal" comment into a
+    /// CI-enforced invariant that trips the moment the two drift apart.
+    #[test]
+    fn da_core_column_count_matches_beacon() {
+        assert_eq!(
+            ream_da::id::NUMBER_OF_COLUMNS,
+            ream_consensus_beacon::data_column_sidecar::NUMBER_OF_COLUMNS,
+        );
     }
 }
