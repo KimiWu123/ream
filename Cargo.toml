@@ -16,6 +16,7 @@ members = [
     "crates/common/da",
     "crates/common/da_node",
     "crates/common/da_adapters/kzg_verifier",
+    "crates/common/da_adapters/tool",
     "crates/common/events/beacon",
     "crates/common/execution/engine",
     "crates/common/execution/rpc_types",
