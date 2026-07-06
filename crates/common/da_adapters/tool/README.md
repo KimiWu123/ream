@@ -19,12 +19,28 @@ ream-da-tool availability <0x-block-root>
 # 128 data column sidecars locally (real KZG cells + proofs), submit them all,
 # and wait until the DA node has verified and stored every one.
 ream-da-tool feed --beacon-url <beacon-api-url> [block_id]
+
+# The same pipeline fully offline: synthesize a KZG-valid block from all-zero
+# blobs (no beacon node anywhere) and submit it…
+ream-da-tool generate --blobs 3 --slot 42
+
+# …or write ingest-ready JSON request bodies for driving the node with curl.
+ream-da-tool generate --out /tmp/da-vectors
+curl -X POST http://127.0.0.1:5062/da/v0/ingest \
+    -H 'content-type: application/json' -d @/tmp/da-vectors/column_0.json
 ```
 
 `--da-url` overrides the DA node address (default `http://127.0.0.1:5062`).
 `block_id` is a slot number, `head`, `finalized`, or a `0x` block root
 (default `head`). `--columns 0,5,17` submits a subset; `--wait` bounds the
 verification wait in seconds.
+
+`generate` builds a synthetic block: real KZG cells and proofs over all-zero blobs,
+and a self-built commitments inclusion proof — valid because the DA node
+deliberately does not verify block authenticity, only KZG and inclusion.
+Deterministic: the same `--slot`/`--blobs` always give the same block root.
+Run the DA node with `--ephemeral` when experimenting so test columns don't
+land in the default data directory.
 
 ## How `feed` derives sidecars without fetching the block
 
