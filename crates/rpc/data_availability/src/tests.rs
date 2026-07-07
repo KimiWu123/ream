@@ -21,8 +21,13 @@ use ream_data_availability_node::{
     store::FileColumnStore,
 };
 use serde_json::{Value, json};
+use ssz::Encode;
+use ssz_types::VariableList;
 
-use crate::routes::register_routers;
+use crate::{
+    handlers::ingest::{WireBlockBatch, WireIndexedPayload},
+    routes::register_routers,
+};
 
 /// A temp-dir-backed store that cleans up on drop.
 struct TempStore {
@@ -173,6 +178,142 @@ async fn ingest_rejects_out_of_range_index() {
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// /ingest/block/{block_root}
+// ---------------------------------------------------------------------------
+
+/// SSZ-encode a batch body from `(index, payload)` pairs.
+fn batch_body(entries: &[(u64, &[u8])]) -> Vec<u8> {
+    let entries: Vec<WireIndexedPayload> = entries
+        .iter()
+        .map(|(index, payload)| WireIndexedPayload {
+            index: *index,
+            payload: VariableList::new(payload.to_vec()).expect("payload within bound"),
+        })
+        .collect();
+    let batch: WireBlockBatch = VariableList::new(entries).expect("batch within bound");
+    batch.as_ssz_bytes()
+}
+
+#[actix_web::test]
+async fn ingest_block_accepts_an_ssz_batch() {
+    let (handle, mut rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(7);
+    let req = test::TestRequest::post()
+        .uri(&format!("/data/v0/ingest/block/0x{root:x}?slot=42"))
+        .insert_header(("content-type", "application/octet-stream"))
+        .set_payload(batch_body(&[(0, &[0xaa]), (5, &[0xbb]), (127, &[0xcc])]))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // The whole batch landed on the queue as one Block item, decoded verbatim.
+    match rx.try_recv().expect("a batch was enqueued") {
+        IngestWorkItem::Block(block) => {
+            assert_eq!(block.block_root(), root);
+            assert_eq!(block.context().slot, 42);
+            assert_eq!(block.column_count(), 3);
+            assert_eq!(block.column_indices().collect::<Vec<_>>(), vec![0, 5, 127]);
+        }
+        other => panic!("expected a block batch, got {other:?}"),
+    }
+}
+
+#[actix_web::test]
+async fn ingest_block_rejects_a_non_ssz_content_type() {
+    let (handle, _rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(7);
+    let req = test::TestRequest::post()
+        .uri(&format!("/data/v0/ingest/block/0x{root:x}?slot=1"))
+        .insert_header(("content-type", "application/json"))
+        .set_payload(batch_body(&[(0, &[0x00])]))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[actix_web::test]
+async fn ingest_block_rejects_a_malformed_ssz_body() {
+    let (handle, _rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(7);
+    let req = test::TestRequest::post()
+        .uri(&format!("/data/v0/ingest/block/0x{root:x}?slot=1"))
+        .insert_header(("content-type", "application/octet-stream"))
+        // A bare offset pointing nowhere: not a decodable batch.
+        .set_payload(vec![0xff, 0x00, 0x01])
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+async fn ingest_block_rejects_a_duplicate_column_index() {
+    let (handle, _rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(7);
+    let req = test::TestRequest::post()
+        .uri(&format!("/data/v0/ingest/block/0x{root:x}?slot=1"))
+        .insert_header(("content-type", "application/octet-stream"))
+        .set_payload(batch_body(&[(3, &[0x00]), (3, &[0x01])]))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+async fn ingest_block_full_queue_is_503() {
+    // Capacity 1, never drained: the first batch fills the queue, the second
+    // is shed with a retryable 503 — all or nothing, never partially queued.
+    let (handle, _rx) = ingest_channel(1);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(7);
+    let make_req = || {
+        test::TestRequest::post()
+            .uri(&format!("/data/v0/ingest/block/0x{root:x}?slot=1"))
+            .insert_header(("content-type", "application/octet-stream"))
+            .set_payload(batch_body(&[(0, &[0x00])]))
+            .to_request()
+    };
+
+    let first = test::call_service(&app, make_req()).await;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    let second = test::call_service(&app, make_req()).await;
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 // ---------------------------------------------------------------------------
