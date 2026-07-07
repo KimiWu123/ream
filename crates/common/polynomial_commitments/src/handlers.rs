@@ -54,6 +54,50 @@ pub fn verify_cell_kzg_proof_batch(
     cells: &VariableList<Cell, MaxBlobCommitmentsPerBlock>,
     proofs_bytes: &VariableList<KZGProof, MaxBlobCommitmentsPerBlock>,
 ) -> anyhow::Result<bool> {
+    verify_cell_kzg_proof_batch_refs(
+        &commitments_bytes.iter().collect::<Vec<_>>(),
+        cell_indices,
+        &cells.iter().collect::<Vec<_>>(),
+        &proofs_bytes.iter().collect::<Vec<_>>(),
+    )
+}
+
+/// Verify the KZG proofs of many data column sidecars in one batched check.
+///
+/// Concatenates every sidecar's `(commitment, cell index, cell, proof)` tuples
+/// into a single batched verification, amortizing the pairing cost across a
+/// whole block instead of paying it once per column. Like the per-sidecar
+/// check, `Ok(true)` means every tuple verified. A `false` (or an error) says
+/// only that *something* in the batch is wrong — batch verification cannot
+/// attribute failures, so callers that need the culprit must fall back to
+/// [`verify_data_column_sidecar_kzg_proofs`] per sidecar.
+pub fn verify_data_column_sidecars_batch<'a>(
+    sidecars: impl IntoIterator<Item = &'a DataColumnSidecar>,
+) -> anyhow::Result<bool> {
+    let mut commitments: Vec<&KZGCommitment> = Vec::new();
+    let mut cell_indices: Vec<u64> = Vec::new();
+    let mut cells: Vec<&Cell> = Vec::new();
+    let mut proofs: Vec<&KZGProof> = Vec::new();
+    for sidecar in sidecars {
+        // As in the per-sidecar check, the column index is the cell index for
+        // every one of the sidecar's rows.
+        commitments.extend(sidecar.kzg_commitments.iter());
+        cell_indices.extend(std::iter::repeat_n(sidecar.index, sidecar.column.len()));
+        cells.extend(sidecar.column.iter());
+        proofs.extend(sidecar.kzg_proofs.iter());
+    }
+    verify_cell_kzg_proof_batch_refs(&commitments, &cell_indices, &cells, &proofs)
+}
+
+/// The reference-based core of the batched cell verification, shared by the
+/// bounded-list wrapper above and the cross-sidecar batch: callers assemble
+/// arbitrarily many tuples without cloning any cell bytes.
+fn verify_cell_kzg_proof_batch_refs(
+    commitments_bytes: &[&KZGCommitment],
+    cell_indices: &[u64],
+    cells: &[&Cell],
+    proofs_bytes: &[&KZGProof],
+) -> anyhow::Result<bool> {
     if commitments_bytes.len() != cells.len()
         || cells.len() != proofs_bytes.len()
         || proofs_bytes.len() != cell_indices.len()

@@ -3,12 +3,15 @@ use std::num::NonZeroUsize;
 use ream_consensus_beacon::data_column_sidecar::DataColumnSidecar;
 use ream_consensus_misc::{blob_parameters::BlobParameters, misc::compute_epoch_at_slot};
 use ream_data_availability::{
-    column::{CandidateColumn, VerifiedColumn},
+    column::{CandidateBlock, CandidateColumn, VerifiedColumn},
     error::ValidationError,
     id::ColumnId,
     verifier::ColumnVerifier,
 };
-use ream_polynomial_commitments::{handlers::verify_data_column_sidecar_kzg_proofs, trusted_setup};
+use ream_polynomial_commitments::{
+    handlers::{verify_data_column_sidecar_kzg_proofs, verify_data_column_sidecars_batch},
+    trusted_setup,
+};
 use ssz::Decode;
 use tree_hash::TreeHash;
 
@@ -91,8 +94,13 @@ impl KzgVerifier {
     }
 }
 
-impl ColumnVerifier for KzgVerifier {
-    fn verify(&self, candidate: CandidateColumn) -> Result<VerifiedColumn, ValidationError> {
+impl KzgVerifier {
+    /// Every check before the cryptography: decode the payload, hold the
+    /// envelope to the sidecar's own header (id and slot), and check the
+    /// structural shape and the commitments inclusion proof. Returns the
+    /// decoded sidecar so the caller decides how to run the KZG step — alone,
+    /// or batched across a block.
+    fn precheck(&self, candidate: &CandidateColumn) -> Result<DataColumnSidecar, ValidationError> {
         let sidecar = self.decode(&candidate.payload)?;
 
         // The id is derived from the payload's own signed header, so a
@@ -110,6 +118,8 @@ impl ColumnVerifier for KzgVerifier {
             });
         }
 
+        // Slot consistency: the envelope slot drives retention bucketing, so it
+        // must be the header's slot.
         if candidate.context.slot != sidecar.signed_block_header.message.slot {
             return Err(ValidationError::SlotMismatch {
                 expected: sidecar.signed_block_header.message.slot,
@@ -126,6 +136,15 @@ impl ColumnVerifier for KzgVerifier {
             return Err(ValidationError::InvalidInclusionProof);
         }
 
+        Ok(sidecar)
+    }
+}
+
+impl ColumnVerifier for KzgVerifier {
+    fn verify(&self, candidate: CandidateColumn) -> Result<VerifiedColumn, ValidationError> {
+        let sidecar = self.precheck(&candidate)?;
+
+        // The scheme-specific cryptographic step.
         match verify_data_column_sidecar_kzg_proofs(&sidecar) {
             Ok(true) => {}
             Ok(false) => return Err(ValidationError::InvalidProof),
@@ -137,6 +156,68 @@ impl ColumnVerifier for KzgVerifier {
             candidate.context,
             candidate.payload,
         ))
+    }
+
+    /// Batched verification of a whole block's columns.
+    ///
+    /// Stage 1 runs the cheap prechecks per column, so structural failures are
+    /// attributed precisely. Stage 2 folds every surviving column into one
+    /// batched KZG check, amortizing the pairing cost across the block. Batch
+    /// verification cannot attribute a failure, so a failing batch falls back
+    /// to per-column KZG checks: the innocent columns still pass, only the
+    /// culprits are rejected.
+    fn verify_block(
+        &self,
+        block: CandidateBlock,
+    ) -> Vec<(u64, Result<VerifiedColumn, ValidationError>)> {
+        // Stage 1: prechecks, one verdict slot per column in submission order.
+        // Survivors park a placeholder verdict that stage 2 overwrites.
+        let mut verdicts: Vec<(u64, Result<VerifiedColumn, ValidationError>)> = Vec::new();
+        let mut survivors: Vec<(usize, DataColumnSidecar, CandidateColumn)> = Vec::new();
+        for candidate in block.into_columns() {
+            let index = candidate.id.index();
+            match self.precheck(&candidate) {
+                Ok(sidecar) => {
+                    survivors.push((verdicts.len(), sidecar, candidate));
+                    verdicts.push((index, Err(ValidationError::InvalidProof)));
+                }
+                Err(err) => verdicts.push((index, Err(err))),
+            }
+        }
+        if survivors.is_empty() {
+            return verdicts;
+        }
+
+        // Stage 2: one cross-column KZG batch over every survivor.
+        let batch_verdict =
+            verify_data_column_sidecars_batch(survivors.iter().map(|(_, sidecar, _)| sidecar));
+        match batch_verdict {
+            Ok(true) => {
+                for (position, _, candidate) in survivors {
+                    verdicts[position].1 = Ok(VerifiedColumn::new_unchecked(
+                        candidate.id,
+                        candidate.context,
+                        candidate.payload,
+                    ));
+                }
+            }
+            // The batch only says "something is wrong", not what: re-check per
+            // column so the innocent still pass.
+            Ok(false) | Err(_) => {
+                for (position, sidecar, candidate) in survivors {
+                    verdicts[position].1 = match verify_data_column_sidecar_kzg_proofs(&sidecar) {
+                        Ok(true) => Ok(VerifiedColumn::new_unchecked(
+                            candidate.id,
+                            candidate.context,
+                            candidate.payload,
+                        )),
+                        Ok(false) => Err(ValidationError::InvalidProof),
+                        Err(err) => Err(ValidationError::VerifierFailure(format!("{err:?}"))),
+                    };
+                }
+            }
+        }
+        verdicts
     }
 }
 
@@ -158,7 +239,7 @@ mod tests {
         polynomial_commitments::{kzg_commitment::KZGCommitment, kzg_proof::KZGProof},
     };
     use ream_data_availability::{
-        column::{CandidateColumn, ColumnContext},
+        column::{CandidateBlock, CandidateColumn, ColumnContext},
         error::ValidationError,
         id::ColumnId,
         verifier::ColumnVerifier,
@@ -210,8 +291,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn accepts_a_valid_sidecar() {
+    /// A full set of 128 KZG-valid sidecars over one all-zero blob: real cell
+    /// proofs, a self-built commitments inclusion proof (the DA node doesn't
+    /// verify block authenticity, so `body_root` can be a synthetic 16-leaf
+    /// tree whose `BLOB_KZG_COMMITMENTS_INDEX` leaf is the commitments root),
+    /// and the zero polynomial's commitment — the G1 point at infinity.
+    fn real_sidecars() -> Vec<DataColumnSidecar> {
         let blob = Blob {
             inner: FixedVector::default(),
         };
@@ -219,15 +304,11 @@ mod tests {
         let (cells, proofs) =
             compute_cells_and_kzg_proofs(&blob, &das_context).expect("compute cells and proofs");
 
-        // The zero polynomial's commitment is the G1 point at infinity.
         let mut commitment_bytes = [0u8; 48];
         commitment_bytes[0] = 0xc0;
         let kzg_commitments = VariableList::new(vec![KZGCommitment(commitment_bytes)])
             .expect("one commitment within bounds");
 
-        // `body_root` is a synthetic tree whose `BLOB_KZG_COMMITMENTS_INDEX`
-        // leaf is the commitments root, so the branch verifies without a real
-        // block body.
         let mut leaves = vec![B256::ZERO; 1 << DATA_COLUMN_SIDECAR_KZG_PROOF_DEPTH];
         leaves[BLOB_KZG_COMMITMENTS_INDEX as usize] = kzg_commitments.tree_hash_root();
         let tree = merkle_tree(&leaves, DATA_COLUMN_SIDECAR_KZG_PROOF_DEPTH).expect("merkle tree");
@@ -252,13 +333,33 @@ mod tests {
             signature: Default::default(),
         };
 
-        let sidecars = get_data_column_sidecars(
+        get_data_column_sidecars(
             signed_block_header,
             kzg_commitments,
             inclusion_proof,
             vec![(cells, proofs)],
         )
-        .expect("assemble column sidecars");
+        .expect("assemble column sidecars")
+    }
+
+    /// A candidate batch built the way the RPC does it: shared root and slot
+    /// from the header, one `(index, payload)` entry per sidecar.
+    fn block_of(sidecars: &[DataColumnSidecar]) -> CandidateBlock {
+        let header = &sidecars[0].signed_block_header.message;
+        CandidateBlock::new(
+            header.tree_hash_root(),
+            ColumnContext { slot: header.slot },
+            sidecars
+                .iter()
+                .map(|sidecar| (sidecar.index, payload_of(sidecar)))
+                .collect(),
+        )
+        .expect("a valid batch")
+    }
+
+    #[test]
+    fn accepts_a_valid_sidecar() {
+        let sidecars = real_sidecars();
 
         let sidecar = &sidecars[7];
         let verified = verifier()
@@ -267,6 +368,82 @@ mod tests {
 
         assert_eq!(verified.id().index(), sidecar.index);
         assert_eq!(verified.payload(), sidecar.as_ssz_bytes());
+    }
+
+    #[test]
+    fn verify_block_accepts_a_real_batch() {
+        let sidecars = real_sidecars();
+
+        // Several real columns as one batch: every verdict comes back Ok
+        // through the single cross-column KZG check.
+        let verdicts = verifier().verify_block(block_of(&sidecars[0..4]));
+
+        assert_eq!(verdicts.len(), 4);
+        for (position, (index, verdict)) in verdicts.iter().enumerate() {
+            assert_eq!(*index, position as u64);
+            let verified = verdict.as_ref().expect("a KZG-valid column is accepted");
+            assert_eq!(verified.id().index(), *index);
+        }
+    }
+
+    #[test]
+    fn verify_block_isolates_the_culprits() {
+        let sidecars = real_sidecars();
+
+        // Corrupt one column's proof: the batched check fails as a whole, and
+        // the per-column fallback must pin the failure on exactly that column.
+        let mut batch = sidecars[0..4].to_vec();
+        let mut bad_proof = batch[2].kzg_proofs[0];
+        bad_proof.0[10] ^= 0xff;
+        batch[2].kzg_proofs = VariableList::new(vec![bad_proof]).expect("proofs within bounds");
+
+        let verdicts = verifier().verify_block(block_of(&batch));
+
+        assert_eq!(verdicts.len(), 4);
+        for (index, verdict) in &verdicts {
+            match index {
+                2 => assert!(
+                    matches!(
+                        verdict,
+                        Err(ValidationError::InvalidProof)
+                            | Err(ValidationError::VerifierFailure(_))
+                    ),
+                    "the corrupted column is rejected"
+                ),
+                _ => assert!(verdict.is_ok(), "innocent column {index} still passes"),
+            }
+        }
+    }
+
+    #[test]
+    fn verify_block_attributes_structural_failures_precisely() {
+        let sidecars = real_sidecars();
+
+        // One entry's payload is garbage: it must fail its own precheck with
+        // MalformedPayload, while its siblings proceed through the batched KZG
+        // check untouched.
+        let header = &sidecars[0].signed_block_header.message;
+        let mut columns: Vec<_> = sidecars[0..3]
+            .iter()
+            .map(|sidecar| (sidecar.index, payload_of(sidecar)))
+            .collect();
+        columns[1].1 = vec![0xde, 0xad, 0xbe, 0xef];
+
+        let block = CandidateBlock::new(
+            header.tree_hash_root(),
+            ColumnContext { slot: header.slot },
+            columns,
+        )
+        .expect("a valid batch");
+
+        let verdicts = verifier().verify_block(block);
+        assert_eq!(verdicts.len(), 3);
+        for (index, verdict) in &verdicts {
+            match index {
+                1 => assert!(matches!(verdict, Err(ValidationError::MalformedPayload(_)))),
+                _ => assert!(verdict.is_ok(), "column {index} still passes"),
+            }
+        }
     }
 
     #[test]
