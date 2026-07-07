@@ -16,8 +16,9 @@ ream-data-availability-tool health
 ream-data-availability-tool availability <0x-block-root>
 
 # The main event: fetch a block's blobs from a live beacon node, derive its
-# 128 data column sidecars locally (real KZG cells + proofs), submit them all,
-# and wait until the data node has verified and stored every one.
+# 128 data column sidecars locally (real KZG cells + proofs), submit them all
+# as ONE SSZ batch request, and wait until the data node has verified and stored
+# every one (one cross-column batched KZG check on the node side).
 ream-data-availability-tool feed --beacon-url <beacon-api-url> [block_id]
 
 # The same pipeline fully offline: synthesize a KZG-valid block from all-zero
@@ -77,6 +78,11 @@ cargo build -p ream   # builds both the `ream` node and `ream-data-availability-
 # 3. ask again any time
 ./target/debug/ream-data-availability-tool availability 0xe4bb...a2d5
 ```
+
+Submission uses `POST /data/v0/ingest/block/{root}?slot=N`: the whole block as
+one `application/octet-stream` SSZ body — payload bytes verbatim, no hex/JSON
+detour, one queue slot, one batched KZG verification. The JSON single-column
+endpoint remains for `curl`-friendly vectors (`generate --out`).
 
 The data node's verifier follows the network's **BPO blob schedule** (EIP-7892):
 each column is checked against the blob limit in force at its own epoch, so

@@ -180,8 +180,9 @@ fn payload_hex(sidecar: &DataColumnSidecar) -> String {
     )
 }
 
-/// Submit the sidecars, then poll availability until every submitted index is
-/// held (verification runs asynchronously behind the ingest queue).
+/// Submit the sidecars as one SSZ block batch, then poll availability until
+/// every submitted index is held (verification runs asynchronously behind the
+/// ingest queue).
 async fn submit_and_wait(
     client: &DataAvailabilityClient,
     block_root: B256,
@@ -189,15 +190,19 @@ async fn submit_and_wait(
     sidecars: &[DataColumnSidecar],
     wait_secs: u64,
 ) -> Result<()> {
-    let mut submitted = Vec::with_capacity(sidecars.len());
-    for sidecar in sidecars {
-        client
-            .ingest(block_root, sidecar.index, slot, &payload_hex(sidecar))
-            .await
-            .with_context(|| format!("submitting column {}", sidecar.index))?;
-        submitted.push(sidecar.index);
-    }
-    println!("submitted {} column(s) to the data node", submitted.len());
+    let columns: Vec<(u64, Vec<u8>)> = sidecars
+        .iter()
+        .map(|sidecar| (sidecar.index, sidecar.as_ssz_bytes()))
+        .collect();
+    client
+        .ingest_block(block_root, slot, &columns)
+        .await
+        .context("submitting the block batch")?;
+    let submitted: Vec<u64> = columns.iter().map(|(index, _)| *index).collect();
+    println!(
+        "submitted {} column(s) to the data node in one batch request",
+        submitted.len()
+    );
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     let availability = loop {
