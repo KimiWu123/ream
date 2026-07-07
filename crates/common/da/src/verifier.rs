@@ -12,11 +12,6 @@ pub trait DaVerifier: Send + Sync {
     /// block. Per-column verdicts (rather than all-or-nothing) fit mixed-trust
     /// sources like backfill, where one invalid column says nothing about its
     /// 127 siblings.
-    ///
-    /// The default implementation simply funnels each column through
-    /// [`DaVerifier::verify`]; scheme adapters should override it when they can
-    /// amortize cryptography across the block (e.g. one batched KZG pairing
-    /// check instead of one per column).
     fn verify_block(
         &self,
         block: CandidateBlock,
