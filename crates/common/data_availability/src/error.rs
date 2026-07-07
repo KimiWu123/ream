@@ -10,6 +10,12 @@ pub enum ValidationError {
         number_of_columns: u64,
     },
 
+    #[error("candidate batch carries no columns")]
+    EmptyBatch,
+
+    #[error("candidate batch lists column {column_index} more than once")]
+    DuplicateColumnIndex { column_index: u64 },
+
     #[error("malformed column payload: {0}")]
     MalformedPayload(String),
 
