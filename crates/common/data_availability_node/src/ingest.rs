@@ -1,4 +1,4 @@
-use ream_data_availability::column::CandidateColumn;
+use ream_data_availability::column::{CandidateBlock, CandidateColumn};
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -8,6 +8,10 @@ use crate::error::IngestionError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestWorkItem {
     Candidate(CandidateColumn),
+    /// A whole block's candidate batch to verify and store. The batch is one
+    /// unit of work: it occupies a single queue slot, and its columns are
+    /// verified and persisted together by the single consumer.
+    Block(CandidateBlock),
     /// A beacon-issued retention boundary.
     Retention(RetentionHint),
 }
@@ -41,6 +45,34 @@ impl IngestHandle {
     pub fn try_submit(&self, candidate: CandidateColumn) -> Result<(), IngestionError> {
         self.sender
             .try_send(IngestWorkItem::Candidate(candidate))
+            .map_err(|err| match err {
+                mpsc::error::TrySendError::Full(_) => IngestionError::Overloaded,
+                mpsc::error::TrySendError::Closed(_) => IngestionError::Closed,
+            })
+    }
+
+    /// Submit a whole block's candidate batch, awaiting while the queue is
+    /// full.
+    ///
+    /// Backpressure semantics match [`Self::submit`]; the batch takes one queue
+    /// slot regardless of how many columns it carries.
+    pub async fn submit_block(&self, block: CandidateBlock) -> Result<(), IngestionError> {
+        self.sender
+            .send(IngestWorkItem::Block(block))
+            .await
+            .map_err(|err| {
+                debug!("block submission failed, receiver dropped: {err}");
+                IngestionError::Closed
+            })
+    }
+
+    /// Submit a whole block's candidate batch without waiting.
+    ///
+    /// Load-shedding semantics match [`Self::try_submit`]: the whole batch is
+    /// either queued or refused — never partially admitted.
+    pub fn try_submit_block(&self, block: CandidateBlock) -> Result<(), IngestionError> {
+        self.sender
+            .try_send(IngestWorkItem::Block(block))
             .map_err(|err| match err {
                 mpsc::error::TrySendError::Full(_) => IngestionError::Overloaded,
                 mpsc::error::TrySendError::Closed(_) => IngestionError::Closed,
