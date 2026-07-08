@@ -11,8 +11,8 @@
 //! Usage:
 //!   ream-da-tool health
 //!   ream-da-tool availability <block_root>
-//!   ream-da-tool feed --beacon-url <url> [block_id] [--columns 0,1,2] [--wait 30]
-//!   ream-da-tool generate [--slot 1] [--blobs 1] [--out dir]
+//!   ream-da-tool feed --beacon-url <url> [block_id] [--columns 0,1,2] [--wait 30] [--per-column]
+//!   ream-da-tool generate [--slot 1] [--blobs 1] [--out dir] [--per-column]
 
 mod beacon;
 mod da;
@@ -68,6 +68,11 @@ enum Command {
         /// Seconds to wait for the DA node to verify the submitted columns.
         #[arg(long, default_value_t = 30)]
         wait: u64,
+        /// Submit one JSON request per column through `/ingest` instead of one
+        /// SSZ batch through `/ingest/block` — the legacy path, kept for
+        /// comparing the two end to end.
+        #[arg(long)]
+        per_column: bool,
     },
     /// Synthesize a block's worth of KZG-valid sidecars offline — no beacon
     /// node needed — and submit them, or write them as ingest-ready vectors.
@@ -89,6 +94,11 @@ enum Command {
         /// Seconds to wait for the DA node to verify the submitted columns.
         #[arg(long, default_value_t = 30)]
         wait: u64,
+        /// Submit one JSON request per column through `/ingest` instead of one
+        /// SSZ batch through `/ingest/block` — the legacy path, kept for
+        /// comparing the two end to end.
+        #[arg(long)]
+        per_column: bool,
     },
 }
 
@@ -111,6 +121,7 @@ async fn main() -> Result<()> {
             block_id,
             columns,
             wait,
+            per_column,
         } => {
             let blob_sidecars = beacon::fetch_blob_sidecars(&beacon_url, &block_id)
                 .await
@@ -134,7 +145,7 @@ async fn main() -> Result<()> {
             );
 
             let selected = select_columns(sidecars, columns.as_deref())?;
-            submit_and_wait(&da, block_root, slot, &selected, wait).await?;
+            submit_and_wait(&da, block_root, slot, &selected, wait, per_column).await?;
         }
         Command::Generate {
             slot,
@@ -142,6 +153,7 @@ async fn main() -> Result<()> {
             out,
             columns,
             wait,
+            per_column,
         } => {
             let (block_root, slot, sidecars) =
                 tokio::task::spawn_blocking(move || build_synthetic_sidecars(slot, blobs))
@@ -155,7 +167,7 @@ async fn main() -> Result<()> {
             let selected = select_columns(sidecars, columns.as_deref())?;
             match out {
                 Some(dir) => write_vectors(&dir, block_root, slot, &selected)?,
-                None => submit_and_wait(&da, block_root, slot, &selected, wait).await?,
+                None => submit_and_wait(&da, block_root, slot, &selected, wait, per_column).await?,
             }
         }
     }
@@ -189,23 +201,48 @@ fn payload_hex(sidecar: &DataColumnSidecar) -> String {
     )
 }
 
-/// Submit the sidecars, then poll availability until every submitted index is
-/// held (verification runs asynchronously behind the ingest queue).
+/// Submit the sidecars — one SSZ block batch by default, or one JSON request
+/// per column with `--per-column` — then poll availability until every
+/// submitted index is held (verification runs asynchronously behind the
+/// ingest queue). Prints wall-clock timings so the two submission paths can
+/// be compared end to end.
 async fn submit_and_wait(
     da: &DaClient,
     block_root: B256,
     slot: u64,
     sidecars: &[DataColumnSidecar],
     wait_secs: u64,
+    per_column: bool,
 ) -> Result<()> {
-    let mut submitted = Vec::with_capacity(sidecars.len());
-    for sidecar in sidecars {
-        da.ingest(block_root, sidecar.index, slot, &payload_hex(sidecar))
+    let submitted: Vec<u64> = sidecars.iter().map(|sidecar| sidecar.index).collect();
+    let started = std::time::Instant::now();
+
+    if per_column {
+        for sidecar in sidecars {
+            da.ingest(block_root, sidecar.index, slot, &payload_hex(sidecar))
+                .await
+                .with_context(|| format!("submitting column {}", sidecar.index))?;
+        }
+        println!(
+            "submitted {} column(s) in {} JSON request(s) — {:.2?}",
+            submitted.len(),
+            submitted.len(),
+            started.elapsed()
+        );
+    } else {
+        let columns: Vec<(u64, Vec<u8>)> = sidecars
+            .iter()
+            .map(|sidecar| (sidecar.index, sidecar.as_ssz_bytes()))
+            .collect();
+        da.ingest_block(block_root, slot, &columns)
             .await
-            .with_context(|| format!("submitting column {}", sidecar.index))?;
-        submitted.push(sidecar.index);
+            .context("submitting the block batch")?;
+        println!(
+            "submitted {} column(s) in one SSZ batch request — {:.2?}",
+            submitted.len(),
+            started.elapsed()
+        );
     }
-    println!("submitted {} column(s) to the DA node", submitted.len());
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
     let availability = loop {
@@ -227,10 +264,13 @@ async fn submit_and_wait(
                     .count()
             );
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     };
 
-    println!("all submitted columns verified and held:");
+    println!(
+        "all submitted columns verified and held — {:.2?} end to end (±100ms poll granularity):",
+        started.elapsed()
+    );
     println!("{}", serde_json::to_string_pretty(&availability)?);
     Ok(())
 }

@@ -6307,6 +6307,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ethereum_ssz",
+ "ethereum_ssz_derive",
  "ream-consensus-beacon",
  "ream-consensus-misc",
  "ream-execution-rpc-types",
