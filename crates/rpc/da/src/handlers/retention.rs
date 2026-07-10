@@ -7,9 +7,12 @@ use ream_da_node::ingest::{DaIngestHandle, RetentionHint};
 
 use crate::handlers::{slot_from_id, submission_error};
 
-/// `POST /da/v0/retention/{slot}` — prune every stored column whose slot is
-/// strictly below `{slot}`. The hint rides the verification queue, so pruning
-/// stays serialized with verification and off the request path.
+/// `POST /da/v0/retention/{slot}` — raise the retention floor to `{slot}`,
+/// pruning every stored column strictly below it. The floor is monotonic and
+/// persistent, so a hint below the current floor is a no-op.
+///
+/// The hint rides the verification queue, so pruning stays serialized with
+/// verification and off the request path.
 #[post("/retention/{slot}")]
 pub async fn post_retention(
     handle: Data<DaIngestHandle>,
