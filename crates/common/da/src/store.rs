@@ -20,7 +20,7 @@ pub enum InsertOutcome {
 /// because the store only ever contains verified data.
 pub trait DaReadStore: Send + Sync {
     fn get(&self, id: &DaColumnId) -> Result<Option<VerifiedColumn>, DaStoreError>;
-    fn availability(&self, block_root: B256) -> Result<DaAvailability, DaStoreError>;
+    fn availability(&self, block_root: B256) -> DaAvailability;
 
     /// The current retention floor, as a slot; `0` means no floor yet.
     fn get_retention_floor(&self) -> u64;

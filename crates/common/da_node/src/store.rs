@@ -284,7 +284,7 @@ impl DaReadStore for DaFileStore {
         )))
     }
 
-    fn availability(&self, block_root: B256) -> Result<DaAvailability, DaStoreError> {
+    fn availability(&self, block_root: B256) -> DaAvailability {
         let held = self
             .index_read()
             .get(&block_root)
@@ -292,7 +292,7 @@ impl DaReadStore for DaFileStore {
             .unwrap_or(0);
         // Full-custody MVP: every column is expected. Custody groups would
         // pass the node's actual custody set here instead.
-        Ok(DaAvailability::new(held, ALL_COLUMNS_MASK))
+        DaAvailability::new(held, ALL_COLUMNS_MASK)
     }
 
     fn get_retention_floor(&self) -> u64 {
@@ -695,25 +695,13 @@ mod tests {
                 .put(sample_column(block, index, 8, b"x"))
                 .expect("put");
         }
-        assert_eq!(
-            store
-                .availability(block)
-                .expect("availability")
-                .held_count(),
-            3
-        );
+        assert_eq!(store.availability(block).held_count(), 3);
 
         store.prune_below_slot(100).expect("prune");
 
         // The bitmap reached 0, so the whole entry is removed.
         assert!(store.index_read().get(&block).is_none());
-        assert_eq!(
-            store
-                .availability(block)
-                .expect("availability")
-                .held_count(),
-            0
-        );
+        assert_eq!(store.availability(block).held_count(), 0);
         for index in [0u64, 5, 7] {
             let id = DaColumnId::new(block, index).expect("valid index");
             assert_eq!(store.get(&id).expect("get"), None);

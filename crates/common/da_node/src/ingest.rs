@@ -1,3 +1,4 @@
+use alloy_primitives::B256;
 use ream_da::column::{CandidateBlock, CandidateColumn};
 use tokio::sync::mpsc;
 
@@ -12,6 +13,16 @@ pub enum DaWorkItem {
     CandidateBlock(CandidateBlock),
     /// A beacon-issued retention boundary.
     Retention(RetentionHint),
+
+    /// A self-issued request to recover one block's missing columns.
+    /// Queued by the verification service itself — with a settling delay
+    Reconstruction(ReconstructionRequest),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconstructionRequest {
+    /// Root of the block whose missing columns should be recovered.
+    pub block_root: B256,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +100,19 @@ impl DaIngestHandle {
                 mpsc::error::TrySendError::Full(_) => IngestionError::Overloaded,
                 mpsc::error::TrySendError::Closed(_) => IngestionError::Closed,
             })
+    }
+
+    // TODO: will be removed after using DB instead file store
+    /// A weak sender for the verification service's own delayed
+    /// reconstruction triggers.
+    ///
+    /// Weak on purpose: the service consuming the queue must not hold a strong
+    /// handle to it, or "every producer dropped" — the shutdown signal that
+    /// ends the service loop — could never happen. Upgrading fails only once
+    /// all real handles are gone, i.e. the node is shutting down and there is
+    /// nothing left worth submitting.
+    pub fn downgrade(&self) -> mpsc::WeakSender<DaWorkItem> {
+        self.sender.downgrade()
     }
 }
 
