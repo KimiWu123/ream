@@ -10,7 +10,7 @@ use crate::tables::ssz_encoder::SSZEncoding;
 ///
 /// A multimap because before finality one slot can carry several competing
 /// blocks; a 1:1 table would drop the losing fork's columns from pruning.
-pub const DATA_AVAILABILITY_SLOT_INDEX_MULTIMAP_TABLE: MultimapTableDefinition<
+pub(crate) const DATA_AVAILABILITY_SLOT_INDEX_MULTIMAP_TABLE: MultimapTableDefinition<
     u64,
     SSZEncoding<B256>,
-> = MultimapTableDefinition::new("da_slot_index");
+> = MultimapTableDefinition::new("da_slot_index_multimap");

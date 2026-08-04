@@ -279,7 +279,7 @@ impl ColumnReadStore for FileColumnStore {
         )))
     }
 
-    fn availability(&self, block_root: B256) -> ColumnAvailability {
+    fn availability(&self, block_root: B256) -> Result<ColumnAvailability, ColumnStoreError> {
         let held = self
             .index_read()
             .get(&block_root)
@@ -287,7 +287,7 @@ impl ColumnReadStore for FileColumnStore {
             .unwrap_or(0);
         // Full-custody MVP: every column is expected. Custody groups would
         // pass the node's actual custody set here instead.
-        ColumnAvailability::new(held, ALL_COLUMNS_MASK)
+        Ok(ColumnAvailability::new(held, ALL_COLUMNS_MASK))
     }
 
     fn get_retention_floor(&self) -> u64 {
@@ -384,7 +384,7 @@ mod tests {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
-        std::env::temp_dir().join(format!("ream-data-store-test-{pid}-{n}"))
+        std::env::temp_dir().join(format!("ream-data-availabilityta-store-test-{pid}-{n}"))
     }
 
     fn sample_column(block_root: B256, index: u64, slot: u64, payload: &[u8]) -> VerifiedColumn {
@@ -686,13 +686,25 @@ mod tests {
                 .put(sample_column(block, index, 8, b"x"))
                 .expect("put");
         }
-        assert_eq!(store.availability(block).held_count(), 3);
+        assert_eq!(
+            store
+                .availability(block)
+                .expect("availability")
+                .held_count(),
+            3
+        );
 
         store.prune_below_slot(100).expect("prune");
 
         // The bitmap reached 0, so the whole entry is removed.
         assert!(store.index_read().get(&block).is_none());
-        assert_eq!(store.availability(block).held_count(), 0);
+        assert_eq!(
+            store
+                .availability(block)
+                .expect("availability")
+                .held_count(),
+            0
+        );
         for index in [0u64, 5, 7] {
             let id = ColumnId::new(block, index).expect("valid index");
             assert_eq!(store.get(&id).expect("get"), None);

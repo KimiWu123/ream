@@ -79,7 +79,15 @@ impl DataAvailabilityVerificationService {
 
         // Re-check: during the delay period, naturally-arriving columns can
         // reach 128 columns and turn this reconstruction into this no-op.
-        let availability = self.store.availability(block_root);
+        let availability = match self.store.availability(block_root) {
+            Ok(availability) => availability,
+            Err(err) => {
+                error!(
+                    "skipping reconstruction of block {block_root}: availability read failed: {err}"
+                );
+                return;
+            }
+        };
         if !availability.is_reconstructable() {
             debug!(
                 "skipping reconstruction of block {block_root}: {held} columns held",
@@ -165,7 +173,15 @@ impl DataAvailabilityVerificationService {
     /// Arm the delayed reconstruction trigger if this write moved the block
     /// *across* the recoverable threshold.
     fn maybe_schedule_reconstruction(&self, block_root: B256, before: &ColumnAvailability) {
-        let after = self.store.availability(block_root);
+        let after = match self.store.availability(block_root) {
+            Ok(after) => after,
+            Err(err) => {
+                error!(
+                    "not scheduling reconstruction of block {block_root}: availability read failed: {err}"
+                );
+                return;
+            }
+        };
         // Arm only on the crossing: a block that was already recoverable
         // before this work item was armed by an earlier one.
         if before.is_reconstructable() || !after.is_reconstructable() {
@@ -231,7 +247,18 @@ impl DataAvailabilityVerificationService {
         // Skip already-held columns before paying for verification. The
         // pre-insert view is kept so the reconstruction trigger can detect a
         // threshold crossing.
-        let before = self.store.availability(id.block_root());
+        let before = match self.store.availability(id.block_root()) {
+            Ok(before) => before,
+            // Dropping the candidate is safer than acting on a guessed empty
+            // bitmap; the feeder retries.
+            Err(err) => {
+                error!(
+                    "dropping candidate column: availability read failed for block root {root}: {err}",
+                    root = id.block_root()
+                );
+                return;
+            }
+        };
         if before.holds(id.index()) {
             debug!(
                 "skipping already-held column: block root {root}, column {index}",
@@ -324,7 +351,15 @@ impl DataAvailabilityVerificationService {
 
         // The pre-insert view is kept so the reconstruction trigger can
         // detect a threshold crossing.
-        let before = self.store.availability(block_root);
+        let before = match self.store.availability(block_root) {
+            Ok(before) => before,
+            Err(err) => {
+                error!(
+                    "dropping candidate block: availability read failed for block root {block_root}: {err}"
+                );
+                return;
+            }
+        };
         let (root, context, mut columns) = candidate.into_parts();
         columns.retain(|(index, _)| {
             let held = before.holds(*index);
@@ -454,7 +489,7 @@ mod tests {
     };
 
     /// Pass-through verifier: these tests exercise the queue-to-store
-    /// plumbing, not the cryptography (tested in `ream-data-availability-verifier-kzg`).
+    /// plumbing, not the cryptography (tested in `ream-data-availabilityta-availability-verifier-kzg`).
     struct AcceptAllVerifier;
 
     impl ColumnVerifier for AcceptAllVerifier {
@@ -484,7 +519,7 @@ mod tests {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
-        std::env::temp_dir().join(format!("ream-data-pipeline-test-{pid}-{n}"))
+        std::env::temp_dir().join(format!("ream-data-availabilityta-pipeline-test-{pid}-{n}"))
     }
 
     fn sample_candidate(
@@ -852,7 +887,10 @@ mod tests {
     async fn wait_until_complete(store: &FileColumnStore, block_root: B256) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let held = store.availability(block_root).held_count();
+            let held = store
+                .availability(block_root)
+                .expect("availability")
+                .held_count();
             if held == NUMBER_OF_COLUMNS {
                 return;
             }

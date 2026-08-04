@@ -52,7 +52,6 @@ use ream_consensus_misc::{
 use ream_data_availability_node::{
     ingest::ingest_channel,
     service::{DEFAULT_RECONSTRUCTION_DELAY, DataAvailabilityVerificationService},
-    store::FileColumnStore,
 };
 use ream_data_availability_verifier_kzg::KzgAdapter;
 use ream_events_beacon::BeaconEvent;
@@ -726,7 +725,13 @@ pub async fn run_data_availability_node(
         config.http_allow_origin,
     );
 
-    let store = Arc::new(FileColumnStore::new(data_dir).expect("failed to open column store"));
+    fs::create_dir_all(&data_dir).expect("failed to create the DA data directory");
+    let store = Arc::new(
+        ReamDB::new(data_dir)
+            .expect("failed to open the DA database")
+            .init_da_db()
+            .expect("failed to initialize the DA tables"),
+    );
     // The blob limit is epoch-dependent (EIP-7892 BPO forks), so the verifier
     // gets the network's whole schedule plus the pre-schedule Electra fallback.
     let network_spec = beacon_network_spec();

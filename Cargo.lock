@@ -7317,6 +7317,7 @@ dependencies = [
  "ream-consensus-beacon",
  "ream-consensus-lean",
  "ream-consensus-misc",
+ "ream-data-availability",
  "ream-execution-rpc-types",
  "ream-light-client",
  "ream-post-quantum-crypto",
