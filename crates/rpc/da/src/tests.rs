@@ -1,25 +1,20 @@
 //! Integration tests for the DA RPC surface.
 
 use std::{
-    fs,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
 };
 
 use actix_web::{App, http::StatusCode, test, web::Data};
 use alloy_primitives::B256;
 use ream_da::{
+    availability::DaAvailability,
     column::{DaContext, VerifiedColumn},
-    id::DaColumnId,
-    store::{DaReadStore, DaWriteStore},
+    error::DaStoreError,
+    id::{ALL_COLUMNS_MASK, DaColumnId},
+    store::DaReadStore,
 };
-use ream_da_node::{
-    ingest::{DaWorkItem, ingest_channel},
-    store::DaFileStore,
-};
+use ream_da_node::ingest::{DaWorkItem, ingest_channel};
 use serde_json::{Value, json};
 use ssz::Encode;
 use ssz_types::VariableList;
@@ -29,41 +24,69 @@ use crate::{
     routes::register_routers,
 };
 
-/// A temp-dir-backed store that cleans up on drop.
-struct TempStore {
-    inner: Arc<DaFileStore>,
-    root: PathBuf,
+/// Stored columns as `(block_root, index) -> (slot, payload)`.
+type Columns = BTreeMap<(B256, u64), (u64, Vec<u8>)>;
+
+/// Read-only in-memory store. The handlers only ever read, so the seeding
+/// path is a plain method rather than [`ream_da::store::DaWriteStore`].
+#[derive(Default)]
+struct MemoryReadStore {
+    columns: RwLock<Columns>,
 }
 
-impl TempStore {
+impl DaReadStore for MemoryReadStore {
+    fn get(&self, id: &DaColumnId) -> Result<Option<VerifiedColumn>, DaStoreError> {
+        let columns = self.columns.read().expect("lock not poisoned");
+        Ok(columns
+            .get(&(id.block_root(), id.index()))
+            .map(|(slot, payload)| {
+                VerifiedColumn::new_unchecked(*id, DaContext { slot: *slot }, payload.clone())
+            }))
+    }
+
+    fn availability(&self, block_root: B256) -> Result<DaAvailability, DaStoreError> {
+        let columns = self.columns.read().expect("lock not poisoned");
+        let held = columns
+            .keys()
+            .filter(|(root, _)| *root == block_root)
+            .fold(0u128, |bits, (_, index)| bits | 1u128 << index);
+        Ok(DaAvailability::new(held, ALL_COLUMNS_MASK))
+    }
+
+    // Retention is exercised through the ingest queue, never through this
+    // store, so a fixed floor of zero is enough.
+    fn get_retention_floor(&self) -> u64 {
+        0
+    }
+
+    fn is_below_retention(&self, _slot: u64) -> bool {
+        false
+    }
+}
+
+/// An in-memory store plus the seeding shorthand these tests need.
+struct TestStore {
+    inner: Arc<MemoryReadStore>,
+}
+
+impl TestStore {
     fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("ream-rpc-da-test-{}-{n}", std::process::id()));
-        let inner = Arc::new(DaFileStore::new(root.clone()).expect("open store"));
-        Self { inner, root }
+        Self {
+            inner: Arc::new(MemoryReadStore::default()),
+        }
     }
 
     fn put(&self, block_root: B256, index: u64, slot: u64, payload: &[u8]) {
         let id = DaColumnId::new(block_root, index).expect("valid index");
         self.inner
-            .put(VerifiedColumn::new_unchecked(
-                id,
-                DaContext { slot },
-                payload.to_vec(),
-            ))
-            .expect("put");
+            .columns
+            .write()
+            .expect("lock not poisoned")
+            .insert((id.block_root(), id.index()), (slot, payload.to_vec()));
     }
 
     fn read_handle(&self) -> Arc<dyn DaReadStore> {
         self.inner.clone()
-    }
-}
-
-impl Drop for TempStore {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.root).ok();
     }
 }
 
@@ -301,7 +324,7 @@ async fn ingest_block_rejects_a_duplicate_column_index() {
 
 #[actix_web::test]
 async fn availability_reports_held_and_missing() {
-    let store = TempStore::new();
+    let store = TestStore::new();
     let root = B256::repeat_byte(2);
     store.put(root, 0, 10, b"a");
     store.put(root, 2, 10, b"b");
@@ -329,7 +352,7 @@ async fn availability_reports_held_and_missing() {
 
 #[actix_web::test]
 async fn availability_unknown_block_is_empty() {
-    let store = TempStore::new();
+    let store = TestStore::new();
     let app = test::init_service(
         App::new()
             .app_data(Data::new(store.read_handle()))
@@ -351,7 +374,7 @@ async fn availability_unknown_block_is_empty() {
 
 #[actix_web::test]
 async fn availability_rejects_non_root_id() {
-    let store = TempStore::new();
+    let store = TestStore::new();
     let app = test::init_service(
         App::new()
             .app_data(Data::new(store.read_handle()))
@@ -372,7 +395,7 @@ async fn availability_rejects_non_root_id() {
 
 #[actix_web::test]
 async fn get_column_returns_stored_payload() {
-    let store = TempStore::new();
+    let store = TestStore::new();
     let root = B256::repeat_byte(3);
     store.put(root, 5, 77, &[0xde, 0xad, 0xbe, 0xef]);
 
@@ -397,7 +420,7 @@ async fn get_column_returns_stored_payload() {
 
 #[actix_web::test]
 async fn get_column_absent_is_404() {
-    let store = TempStore::new();
+    let store = TestStore::new();
     let root = B256::repeat_byte(3);
     store.put(root, 5, 77, b"present");
 
@@ -418,7 +441,7 @@ async fn get_column_absent_is_404() {
 
 #[actix_web::test]
 async fn get_column_out_of_range_index_is_400() {
-    let store = TempStore::new();
+    let store = TestStore::new();
     let app = test::init_service(
         App::new()
             .app_data(Data::new(store.read_handle()))
@@ -436,7 +459,7 @@ async fn get_column_out_of_range_index_is_400() {
 
 #[actix_web::test]
 async fn get_columns_returns_every_held_column() {
-    let store = TempStore::new();
+    let store = TestStore::new();
     let root = B256::repeat_byte(4);
     for index in [0u64, 1, 2] {
         store.put(root, index, 30, b"x");

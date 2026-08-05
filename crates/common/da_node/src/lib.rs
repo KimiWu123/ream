@@ -1,4 +1,5 @@
 pub mod error;
 pub mod ingest;
 pub mod service;
-pub mod store;
+#[cfg(test)]
+mod test_store;
