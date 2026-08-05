@@ -58,4 +58,9 @@ pub enum DaStoreError {
     /// Underlying storage failure; "not found" is `Ok(None)`, not an error.
     #[error("storage I/O failure: {0}")]
     Io(#[from] io::Error),
+
+    /// Failure inside an embedded storage backend, carried as a message so
+    /// `ream-da` stays free of any backend dependency.
+    #[error("storage backend failure: {0}")]
+    Backend(String),
 }
