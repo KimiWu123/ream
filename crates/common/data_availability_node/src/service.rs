@@ -463,10 +463,9 @@ impl DataAvailabilityVerificationService {
 #[cfg(test)]
 mod tests {
     use std::{
-        path::PathBuf,
         sync::{
             Arc,
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -485,11 +484,11 @@ mod tests {
     use super::DataAvailabilityVerificationService;
     use crate::{
         ingest::{RetentionHint, ingest_channel},
-        store::FileColumnStore,
+        test_store::DaMemoryStore,
     };
 
     /// Pass-through verifier: these tests exercise the queue-to-store
-    /// plumbing, not the cryptography (tested in `ream-data-availabilityta-availability-verifier-kzg`).
+    /// plumbing, not the cryptography (tested in `ream-data-availabilityta-availabilityta-availability-verifier-kzg`).
     struct AcceptAllVerifier;
 
     impl ColumnVerifier for AcceptAllVerifier {
@@ -515,13 +514,6 @@ mod tests {
         }
     }
 
-    fn temp_root() -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        std::env::temp_dir().join(format!("ream-data-availabilityta-pipeline-test-{pid}-{n}"))
-    }
-
     fn sample_candidate(
         block_root: B256,
         index: u64,
@@ -538,8 +530,7 @@ mod tests {
     #[test]
     fn submitted_candidates_are_verified_and_stored() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(AcceptAllVerifier);
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -577,8 +568,6 @@ mod tests {
                 assert_eq!(stored.payload(), candidate.payload);
             }
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A retention hint submitted after some candidates prunes exactly the
@@ -587,8 +576,7 @@ mod tests {
     #[test]
     fn retention_hint_prunes_columns_below_the_boundary() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(AcceptAllVerifier);
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -627,8 +615,6 @@ mod tests {
             assert_eq!(store.get(&old_b.id).expect("get"), None);
             assert!(store.get(&recent.id).expect("get").is_some());
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// A verifier that counts its calls and rejects a chosen set of column indices
@@ -686,8 +672,7 @@ mod tests {
     #[test]
     fn submitted_block_batch_is_verified_and_stored() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -717,15 +702,12 @@ mod tests {
             }
             assert_eq!(verifier.calls(), 3, "each submitted column verified once");
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn block_batch_skips_already_held_columns() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -764,15 +746,12 @@ mod tests {
             // ...but the held one was never re-verified.
             assert_eq!(verifier.calls(), 2, "held column skipped verification");
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn block_batch_stores_survivors_when_some_columns_are_rejected() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(CountingVerifier::rejecting(vec![3]));
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -802,15 +781,12 @@ mod tests {
             let rejected = ColumnId::new(block_root, 3).expect("valid index");
             assert_eq!(store.get(&rejected).expect("get"), None);
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn below_floor_candidate_is_skipped_before_verification() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -840,8 +816,6 @@ mod tests {
                 "a below-floor candidate must be skipped before verification"
             );
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     struct FillMissingReconstructor {
@@ -884,7 +858,7 @@ mod tests {
     }
 
     /// Poll until the block holds every column or a deadline passes.
-    async fn wait_until_complete(store: &FileColumnStore, block_root: B256) {
+    async fn wait_until_complete(store: &DaMemoryStore, block_root: B256) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let held = store
@@ -905,8 +879,7 @@ mod tests {
     #[test]
     fn incomplete_block_self_heals_through_the_verify_gate() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let reconstructor = FillMissingReconstructor::new();
         let (handle, rx) = ingest_channel(8);
@@ -946,15 +919,12 @@ mod tests {
             assert_eq!(stored.payload(), &[100u8]);
             assert_eq!(stored.context().slot, 40);
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn a_trickled_column_crossing_the_threshold_triggers_recovery() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let reconstructor = FillMissingReconstructor::new();
         let (handle, rx) = ingest_channel(8);
@@ -991,15 +961,12 @@ mod tests {
 
             assert_eq!(reconstructor.calls(), 1, "one crossing, one recovery");
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn reconstruction_stands_down_when_the_block_completes_naturally() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let reconstructor = FillMissingReconstructor::new();
         let (handle, rx) = ingest_channel(8);
@@ -1041,15 +1008,12 @@ mod tests {
                 "a complete block is never recovered"
             );
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn no_reconstruction_below_half_the_columns() {
         let executor = ReamExecutor::new().expect("create executor");
-        let root = temp_root();
-        let store = Arc::new(FileColumnStore::new(root.clone()).expect("open store"));
+        let store = Arc::new(DaMemoryStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let reconstructor = FillMissingReconstructor::new();
         let (handle, rx) = ingest_channel(8);
@@ -1085,7 +1049,5 @@ mod tests {
                 "below half there is nothing to arm"
             );
         });
-
-        std::fs::remove_dir_all(&root).ok();
     }
 }
