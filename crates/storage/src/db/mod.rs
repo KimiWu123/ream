@@ -1,10 +1,12 @@
 pub mod beacon;
+pub mod da;
 pub mod lean;
 
 use std::{fs, io, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use beacon::BeaconDB;
+use da::DaDB;
 use lean::LeanDB;
 use redb::{Builder, Database};
 use tracing::info;
@@ -25,6 +27,11 @@ use crate::{
             unrealized_finalized_checkpoint::UnrealizedFinalizedCheckpointField,
             unrealized_justifications::UnrealizedJustificationsTable,
             unrealized_justified_checkpoint::UnrealizedJustifiedCheckpointField,
+        },
+        da::{
+            availability::AvailabilityTable, data_column_sidecar::DataColumnSidecarTable,
+            retention_floor::RetentionFloorField,
+            slot_index::DATA_AVAILABILITY_SLOT_INDEX_MULTIMAP_TABLE,
         },
         field::REDBField,
         lean::{
@@ -128,6 +135,20 @@ impl ReamDB {
         Ok(LeanDB {
             db: self.db.clone(),
             cache: None,
+        })
+    }
+
+    pub fn init_da_db(&self) -> Result<DaDB, StoreError> {
+        let write_txn = self.db.begin_write()?;
+
+        write_txn.open_table(AvailabilityTable::TABLE_DEFINITION)?;
+        write_txn.open_table(DataColumnSidecarTable::TABLE_DEFINITION)?;
+        write_txn.open_table(RetentionFloorField::FIELD_DEFINITION)?;
+        write_txn.open_multimap_table(DATA_AVAILABILITY_SLOT_INDEX_MULTIMAP_TABLE)?;
+        write_txn.commit()?;
+
+        Ok(DaDB {
+            db: self.db.clone(),
         })
     }
 }

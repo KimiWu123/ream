@@ -1,0 +1,533 @@
+//! Integration tests for the DA RPC surface.
+
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+};
+
+use actix_web::{App, http::StatusCode, test, web::Data};
+use alloy_primitives::B256;
+use ream_da::{
+    availability::DaAvailability,
+    column::{DaContext, VerifiedColumn},
+    error::DaStoreError,
+    id::{ALL_COLUMNS_MASK, DaColumnId},
+    store::DaReadStore,
+};
+use ream_da_node::ingest::{DaWorkItem, ingest_channel};
+use serde_json::{Value, json};
+use ssz::Encode;
+use ssz_types::VariableList;
+
+use crate::{
+    handlers::ingest::{WireBlockBatch, WireIndexedPayload},
+    routes::register_routers,
+};
+
+/// Stored columns as `(block_root, index) -> (slot, payload)`.
+type Columns = BTreeMap<(B256, u64), (u64, Vec<u8>)>;
+
+/// Read-only in-memory store. The handlers only ever read, so the seeding
+/// path is a plain method rather than [`ream_da::store::DaWriteStore`].
+#[derive(Default)]
+struct MemoryReadStore {
+    columns: RwLock<Columns>,
+}
+
+impl DaReadStore for MemoryReadStore {
+    fn get(&self, id: &DaColumnId) -> Result<Option<VerifiedColumn>, DaStoreError> {
+        let columns = self.columns.read().expect("lock not poisoned");
+        Ok(columns
+            .get(&(id.block_root(), id.index()))
+            .map(|(slot, payload)| {
+                VerifiedColumn::new_unchecked(*id, DaContext { slot: *slot }, payload.clone())
+            }))
+    }
+
+    fn availability(&self, block_root: B256) -> Result<DaAvailability, DaStoreError> {
+        let columns = self.columns.read().expect("lock not poisoned");
+        let held = columns
+            .keys()
+            .filter(|(root, _)| *root == block_root)
+            .fold(0u128, |bits, (_, index)| bits | 1u128 << index);
+        Ok(DaAvailability::new(held, ALL_COLUMNS_MASK))
+    }
+
+    // Retention is exercised through the ingest queue, never through this
+    // store, so a fixed floor of zero is enough.
+    fn get_retention_floor(&self) -> u64 {
+        0
+    }
+
+    fn is_below_retention(&self, _slot: u64) -> bool {
+        false
+    }
+}
+
+/// An in-memory store plus the seeding shorthand these tests need.
+struct TestStore {
+    inner: Arc<MemoryReadStore>,
+}
+
+impl TestStore {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(MemoryReadStore::default()),
+        }
+    }
+
+    fn put(&self, block_root: B256, index: u64, slot: u64, payload: &[u8]) {
+        let id = DaColumnId::new(block_root, index).expect("valid index");
+        self.inner
+            .columns
+            .write()
+            .expect("lock not poisoned")
+            .insert((id.block_root(), id.index()), (slot, payload.to_vec()));
+    }
+
+    fn read_handle(&self) -> Arc<dyn DaReadStore> {
+        self.inner.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /health
+// ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn health_reports_ok() {
+    // No app_data needed: the probe touches neither store nor ingest handle.
+    let app = test::init_service(App::new().configure(register_routers)).await;
+
+    let req = test::TestRequest::get().uri("/da/v0/health").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["status"].as_str(), Some("healthy"));
+    assert_eq!(body["service"].as_str(), Some("da-node"));
+}
+
+// ---------------------------------------------------------------------------
+// /ingest
+// ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn ingest_accepts_valid_candidate() {
+    let (handle, mut rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(1);
+    let req = test::TestRequest::post()
+        .uri("/da/v0/ingest")
+        .set_json(json!({
+            "block_root": format!("0x{root:x}"),
+            "index": 3,
+            "slot": 42,
+            "payload": "0xdeadbeef",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    match rx.try_recv().expect("a candidate was enqueued") {
+        DaWorkItem::Candidate(candidate) => {
+            assert_eq!(candidate.id.block_root(), root);
+            assert_eq!(candidate.id.index(), 3);
+            assert_eq!(candidate.context.slot, 42);
+            assert_eq!(candidate.payload, [0xde, 0xad, 0xbe, 0xef]);
+        }
+        other => panic!("expected a candidate, got {other:?}"),
+    }
+}
+
+#[actix_web::test]
+async fn ingest_full_queue_is_503() {
+    // Capacity 1 and `_rx` is never drained, so the second submit finds the
+    // queue full.
+    let (handle, _rx) = ingest_channel(1);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(1);
+    let make_req = || {
+        test::TestRequest::post()
+            .uri("/da/v0/ingest")
+            .set_json(json!({
+                "block_root": format!("0x{root:x}"),
+                "index": 3,
+                "slot": 42,
+                "payload": "0x00",
+            }))
+            .to_request()
+    };
+
+    let first = test::call_service(&app, make_req()).await;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+
+    let second = test::call_service(&app, make_req()).await;
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[actix_web::test]
+async fn ingest_rejects_out_of_range_index() {
+    let (handle, _rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(1);
+    let req = test::TestRequest::post()
+        .uri("/da/v0/ingest")
+        .set_json(json!({
+            "block_root": format!("0x{root:x}"),
+            "index": 128, // == NUMBER_OF_COLUMNS, never a valid column
+            "slot": 1,
+            "payload": "0x00",
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// /ingest/block/{block_root}
+// ---------------------------------------------------------------------------
+
+/// SSZ-encode a batch body from `(index, payload)` pairs.
+fn batch_body(entries: &[(u64, &[u8])]) -> Vec<u8> {
+    let entries: Vec<WireIndexedPayload> = entries
+        .iter()
+        .map(|(index, payload)| WireIndexedPayload {
+            index: *index,
+            payload: VariableList::new(payload.to_vec()).expect("payload within bound"),
+        })
+        .collect();
+    let batch: WireBlockBatch = VariableList::new(entries).expect("batch within bound");
+    batch.as_ssz_bytes()
+}
+
+#[actix_web::test]
+async fn ingest_block_accepts_an_ssz_batch() {
+    let (handle, mut rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(7);
+    let req = test::TestRequest::post()
+        .uri(&format!("/da/v0/ingest/block/0x{root:x}?slot=42"))
+        .insert_header(("content-type", "application/octet-stream"))
+        .set_payload(batch_body(&[(0, &[0xaa]), (5, &[0xbb]), (127, &[0xcc])]))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    // The whole batch landed on the queue as one item, decoded verbatim.
+    match rx.try_recv().expect("a batch was enqueued") {
+        DaWorkItem::CandidateBlock(block) => {
+            assert_eq!(block.block_root(), root);
+            assert_eq!(block.context().slot, 42);
+            assert_eq!(block.columns_len(), 3);
+            let expected = [(0, vec![0xaa]), (5, vec![0xbb]), (127, vec![0xcc])];
+            for ((index, payload), (expected_index, expected_bytes)) in
+                block.columns().iter().zip(&expected)
+            {
+                assert_eq!(index, expected_index);
+                assert_eq!(payload, expected_bytes);
+            }
+        }
+        other => panic!("expected a block batch, got {other:?}"),
+    }
+}
+
+#[actix_web::test]
+async fn ingest_block_rejects_a_non_ssz_content_type() {
+    let (handle, _rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(7);
+    let req = test::TestRequest::post()
+        .uri(&format!("/da/v0/ingest/block/0x{root:x}?slot=1"))
+        .insert_header(("content-type", "application/json"))
+        .set_payload(batch_body(&[(0, &[0x00])]))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[actix_web::test]
+async fn ingest_block_rejects_a_malformed_ssz_body() {
+    let (handle, _rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(7);
+    let req = test::TestRequest::post()
+        .uri(&format!("/da/v0/ingest/block/0x{root:x}?slot=1"))
+        .insert_header(("content-type", "application/octet-stream"))
+        // A bare offset pointing nowhere: not a decodable batch.
+        .set_payload(vec![0xff, 0x00, 0x01])
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+async fn ingest_block_rejects_a_duplicate_column_index() {
+    let (handle, _rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(7);
+    let req = test::TestRequest::post()
+        .uri(&format!("/da/v0/ingest/block/0x{root:x}?slot=1"))
+        .insert_header(("content-type", "application/octet-stream"))
+        .set_payload(batch_body(&[(3, &[0x00]), (3, &[0x01])]))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// /availability/{block_root}
+// ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn availability_reports_held_and_missing() {
+    let store = TestStore::new();
+    let root = B256::repeat_byte(2);
+    store.put(root, 0, 10, b"a");
+    store.put(root, 2, 10, b"b");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(store.read_handle()))
+            .configure(register_routers),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/da/v0/availability/0x{root:x}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["complete"].as_bool(), Some(false));
+    assert_eq!(body["held_count"].as_u64(), Some(2));
+    let missing = body["missing"].as_array().expect("missing is an array");
+    assert!(missing.iter().any(|v| v.as_u64() == Some(1)));
+    assert!(!missing.iter().any(|v| v.as_u64() == Some(0)));
+}
+
+#[actix_web::test]
+async fn availability_unknown_block_is_empty() {
+    let store = TestStore::new();
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(store.read_handle()))
+            .configure(register_routers),
+    )
+    .await;
+
+    let unknown = B256::repeat_byte(9);
+    let req = test::TestRequest::get()
+        .uri(&format!("/da/v0/availability/0x{unknown:x}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["held_count"].as_u64(), Some(0));
+    assert_eq!(body["complete"].as_bool(), Some(false));
+}
+
+#[actix_web::test]
+async fn availability_rejects_non_root_id() {
+    let store = TestStore::new();
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(store.read_handle()))
+            .configure(register_routers),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/da/v0/availability/head")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// /columns/{block_root}[/{index}]
+// ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn get_column_returns_stored_payload() {
+    let store = TestStore::new();
+    let root = B256::repeat_byte(3);
+    store.put(root, 5, 77, &[0xde, 0xad, 0xbe, 0xef]);
+
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(store.read_handle()))
+            .configure(register_routers),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/da/v0/columns/0x{root:x}/5"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: Value = test::read_body_json(resp).await;
+    assert_eq!(body["index"].as_u64(), Some(5));
+    assert_eq!(body["slot"].as_u64(), Some(77));
+    assert_eq!(body["payload"].as_str(), Some("0xdeadbeef"));
+}
+
+#[actix_web::test]
+async fn get_column_absent_is_404() {
+    let store = TestStore::new();
+    let root = B256::repeat_byte(3);
+    store.put(root, 5, 77, b"present");
+
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(store.read_handle()))
+            .configure(register_routers),
+    )
+    .await;
+
+    // Valid index, just not held for this block.
+    let req = test::TestRequest::get()
+        .uri(&format!("/da/v0/columns/0x{root:x}/6"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[actix_web::test]
+async fn get_column_out_of_range_index_is_400() {
+    let store = TestStore::new();
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(store.read_handle()))
+            .configure(register_routers),
+    )
+    .await;
+
+    let root = B256::repeat_byte(3);
+    let req = test::TestRequest::get()
+        .uri(&format!("/da/v0/columns/0x{root:x}/999"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+async fn get_columns_returns_every_held_column() {
+    let store = TestStore::new();
+    let root = B256::repeat_byte(4);
+    for index in [0u64, 1, 2] {
+        store.put(root, index, 30, b"x");
+    }
+
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(store.read_handle()))
+            .configure(register_routers),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/da/v0/columns/0x{root:x}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: Value = test::read_body_json(resp).await;
+    let columns = body.as_array().expect("an array of columns");
+    assert_eq!(columns.len(), 3);
+    let mut indices: Vec<u64> = columns
+        .iter()
+        .map(|c| c["index"].as_u64().expect("index"))
+        .collect();
+    indices.sort_unstable();
+    assert_eq!(indices, vec![0, 1, 2]);
+}
+
+// ---------------------------------------------------------------------------
+// /retention/{slot}
+// ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn retention_enqueues_hint() {
+    let (handle, mut rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/da/v0/retention/99")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    match rx.try_recv().expect("a retention hint was enqueued") {
+        DaWorkItem::Retention(hint) => assert_eq!(hint.slot, 99),
+        other => panic!("expected a retention hint, got {other:?}"),
+    }
+}
+
+#[actix_web::test]
+async fn retention_rejects_non_slot_id() {
+    let (handle, _rx) = ingest_channel(8);
+    let app = test::init_service(
+        App::new()
+            .app_data(Data::new(handle))
+            .configure(register_routers),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/da/v0/retention/head")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

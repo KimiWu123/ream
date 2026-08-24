@@ -1,5 +1,5 @@
 [package]
-name = "ream-storage"
+name = "ream-da-verifier-kzg"
 authors.workspace = true
 edition.workspace = true
 keywords.workspace = true
@@ -9,36 +9,24 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
-[features]
-default = ["devnet5"]
-devnet5 = ["ream-consensus-lean/devnet5"]
-
 [dependencies]
 alloy-primitives.workspace = true
 anyhow.workspace = true
-directories.workspace = true
 ethereum_ssz.workspace = true
-ethereum_ssz_derive.workspace = true
-lru.workspace = true
-ream-bls.workspace = true
-redb.workspace = true
-snap.workspace = true
-ssz_types.workspace = true
-tempdir.workspace = true
-tempfile.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
-tracing.workspace = true
+rust_eth_kzg.workspace = true
 tree_hash.workspace = true
 
 # ream dependencies
 ream-consensus-beacon.workspace = true
-ream-consensus-lean.workspace = true
 ream-consensus-misc.workspace = true
 ream-da.workspace = true
+ream-merkle.workspace = true
+ream-polynomial-commitments.workspace = true
+
+[dev-dependencies]
 ream-execution-rpc-types.workspace = true
-ream-light-client.workspace = true
-ream-post-quantum-crypto.workspace = true
+serde_json.workspace = true
+ssz_types.workspace = true
 
 [lints]
 workspace = true
