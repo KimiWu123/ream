@@ -202,11 +202,16 @@ impl DataAvailabilityVerificationService {
             let Some(sender) = sender.upgrade() else {
                 return;
             };
-            let _ = sender
+            if let Err(err) = sender
                 .send(IngestWorkItem::Reconstruction(ReconstructionRequest {
                     block_root,
                 }))
-                .await;
+                .await
+            {
+                warn!(
+                    "dropping reconstruction trigger for block {block_root}: the ingest queue closed while the delay was pending: {err}"
+                );
+            }
         });
     }
 
@@ -249,8 +254,6 @@ impl DataAvailabilityVerificationService {
         // threshold crossing.
         let before = match self.store.availability(id.block_root()) {
             Ok(before) => before,
-            // Dropping the candidate is safer than acting on a guessed empty
-            // bitmap; the feeder retries.
             Err(err) => {
                 error!(
                     "dropping candidate column: availability read failed for block root {root}: {err}",
