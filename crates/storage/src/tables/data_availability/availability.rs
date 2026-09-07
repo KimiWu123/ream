@@ -18,13 +18,13 @@ pub struct AvailabilityTable {
     pub db: Arc<Database>,
 }
 
-/// Table definition for the DA availability table
+/// Table definition for the per-block column availability table
 ///
 /// Key: block_root
 /// Value: the block's slot plus its held-columns bitmap
 impl REDBTable for AvailabilityTable {
     const TABLE_DEFINITION: TableDefinition<'_, SSZEncoding<B256>, SSZEncoding<BlockEntry>> =
-        TableDefinition::new("da_availability");
+        TableDefinition::new("data_availability_block_entry");
 
     type Key = B256;
 

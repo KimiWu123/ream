@@ -725,12 +725,12 @@ pub async fn run_data_availability_node(
         config.http_allow_origin,
     );
 
-    fs::create_dir_all(&data_dir).expect("failed to create the DA data directory");
+    fs::create_dir_all(&data_dir).expect("failed to create the data availability directory");
     let store = Arc::new(
         ReamDB::new(data_dir)
-            .expect("failed to open the DA database")
-            .init_da_db()
-            .expect("failed to initialize the DA tables"),
+            .expect("failed to open the data availability database")
+            .init_data_availability_db()
+            .expect("failed to initialize the data availability tables"),
     );
     // The blob limit is epoch-dependent (EIP-7892 BPO forks), so the verifier
     // gets the network's whole schedule plus the pre-schedule Electra fallback.

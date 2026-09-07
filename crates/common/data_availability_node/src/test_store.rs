@@ -35,18 +35,13 @@ struct State {
     retention_floor: u64,
 }
 
-/// Non-persistent [`ColumnWriteStore`] for this crate's tests, so a test that
-/// exercises something else — the verification pipeline — does not need a
-/// database on disk. Production storage is `ream_storage::db::da::DaDB`.
-///
-/// One lock guards the whole state, mirroring the database store's
-/// single-transaction property: a compound update is never half-applied.
+/// Non-persistent [`ColumnWriteStore`] for this crate's tests
 #[derive(Debug, Default)]
-pub struct DaMemoryStore {
+pub struct MemoryColumnStore {
     state: RwLock<State>,
 }
 
-impl DaMemoryStore {
+impl MemoryColumnStore {
     pub fn new() -> Self {
         Self::default()
     }
@@ -65,7 +60,7 @@ impl DaMemoryStore {
     }
 }
 
-impl ColumnReadStore for DaMemoryStore {
+impl ColumnReadStore for MemoryColumnStore {
     fn get(&self, id: &ColumnId) -> Result<Option<VerifiedColumn>, ColumnStoreError> {
         let state = self.read();
         let Some(entry) = state.blocks.get(&id.block_root()) else {
@@ -98,7 +93,7 @@ impl ColumnReadStore for DaMemoryStore {
     }
 }
 
-impl ColumnWriteStore for DaMemoryStore {
+impl ColumnWriteStore for MemoryColumnStore {
     fn put(&self, column: VerifiedColumn) -> Result<InsertOutcome, ColumnStoreError> {
         let id = column.id();
         // An out-of-range index must not be shifted into the bitmap.

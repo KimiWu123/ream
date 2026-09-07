@@ -12,7 +12,7 @@ use redb::{Database, Durability, ReadableDatabase, ReadableMultimapTable, Readab
 use tracing::{debug, info, trace, warn};
 
 use crate::tables::{
-    da::{
+    data_availability::{
         availability::{AvailabilityTable, BlockEntry},
         data_column_sidecar::DataColumnSidecarTable,
         retention_floor::RetentionFloorField,
@@ -31,14 +31,14 @@ fn backend(err: impl Display) -> ColumnStoreError {
     ColumnStoreError::Backend(err.to_string())
 }
 
-/// redb-backed DA store. Only [`crate::db::ReamDB::init_da_db`] constructs
-/// one, so holding a `DaDB` proves every DA table exists in the database.
+/// redb-backed data availability store. Only [`crate::db::ReamDB::init_data_availability_db`] constructs
+/// one, so holding a `DataAvailabilityDB` proves every data availability table exists in the database.
 #[derive(Clone, Debug)]
-pub struct DaDB {
+pub struct DataAvailabilityDB {
     pub db: Arc<Database>,
 }
 
-impl DaDB {
+impl DataAvailabilityDB {
     fn read_block_entry(&self, block_root: B256) -> Result<Option<BlockEntry>, ColumnStoreError> {
         let read_txn = self.db.begin_read().map_err(backend)?;
         let availability = read_txn
@@ -63,7 +63,7 @@ impl DaDB {
     }
 }
 
-impl ColumnReadStore for DaDB {
+impl ColumnReadStore for DataAvailabilityDB {
     /// `Ok(None)` is "not present"; `Err` is an actual backend failure.
     fn get(&self, id: &ColumnId) -> Result<Option<VerifiedColumn>, ColumnStoreError> {
         // An out-of-range index must not be shifted into the bitmap.
@@ -138,7 +138,7 @@ impl ColumnReadStore for DaDB {
     }
 }
 
-impl ColumnWriteStore for DaDB {
+impl ColumnWriteStore for DataAvailabilityDB {
     /// Idempotent per id: a duplicate put keeps the stored column.
     fn put(&self, column: VerifiedColumn) -> Result<InsertOutcome, ColumnStoreError> {
         let id = column.id();
@@ -290,7 +290,7 @@ mod tests {
         store::{ColumnReadStore, ColumnWriteStore, InsertOutcome},
     };
 
-    use super::DaDB;
+    use super::DataAvailabilityDB;
     use crate::db::ReamDB;
 
     fn temp_root() -> PathBuf {
@@ -300,10 +300,12 @@ mod tests {
         std::env::temp_dir().join(format!("ream-data-availability-db-test-{pid}-{n}"))
     }
 
-    fn open_store(root: &Path) -> DaDB {
+    fn open_store(root: &Path) -> DataAvailabilityDB {
         fs::create_dir_all(root).expect("create db dir");
         let ream_db = ReamDB::new(root.to_path_buf()).expect("open database");
-        ream_db.init_da_db().expect("init DA tables")
+        ream_db
+            .init_data_availability_db()
+            .expect("init data availability tables")
     }
 
     fn sample_column(block_root: B256, index: u64, slot: u64, payload: &[u8]) -> VerifiedColumn {
@@ -505,6 +507,91 @@ mod tests {
         // ...including the persisted copy: the lower hint must not reach the database
         let reopened = open_store(&root);
         assert_eq!(reopened.get_retention_floor(), 100);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn retention_floor_survives_reopen() {
+        let root = temp_root();
+        let store = open_store(&root);
+
+        // The floor only ever moves through `prune_below_slot`, so that is how
+        // a restart-surviving floor gets set in the first place.
+        store.prune_below_slot(64).expect("raise floor");
+        assert_eq!(store.get_retention_floor(), 64);
+        drop(store);
+
+        // Reopening must recover the floor from the database, not restart at 0
+        // — a forgotten floor would silently re-admit data the beacon asked us
+        // to drop.
+        let reopened = open_store(&root);
+        assert_eq!(reopened.get_retention_floor(), 64);
+        assert!(reopened.is_below_retention(63));
+        assert!(!reopened.is_below_retention(64));
+
+        // The recovered floor is enforced, not merely reported.
+        let stale = sample_column(B256::repeat_byte(7), 0, 63, b"stale");
+        let stale_id = stale.id();
+        assert_eq!(
+            reopened.put(stale).expect("put"),
+            InsertOutcome::BelowRetention
+        );
+        assert_eq!(reopened.get(&stale_id).expect("get"), None);
+
+        let fresh = sample_column(B256::repeat_byte(8), 1, 64, b"fresh");
+        assert_eq!(reopened.put(fresh).expect("put"), InsertOutcome::Inserted);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn columns_below_the_floor_stay_gone_after_reopen() {
+        let root = temp_root();
+        let store = open_store(&root);
+
+        let old = B256::repeat_byte(1);
+        let recent = B256::repeat_byte(2);
+        store.put(sample_column(old, 0, 10, b"old-0")).expect("put");
+        store.put(sample_column(old, 4, 10, b"old-4")).expect("put");
+        store
+            .put(sample_column(recent, 1, 20, b"recent-1"))
+            .expect("put");
+
+        assert_eq!(store.prune_below_slot(15).expect("prune"), 2);
+        drop(store);
+
+        // `prune_below_slot` moves the floor and deletes the columns in one
+        // durable write transaction, so a restart can never observe a raised
+        // floor with the data it covers still present. The file-backed store
+        // re-pruned at startup to reach this state; here the commit guarantees
+        // it, and this test is what pins that guarantee down.
+        let reopened = open_store(&root);
+        assert_eq!(reopened.get_retention_floor(), 15);
+
+        let old_0 = ColumnId::new(old, 0).expect("valid index");
+        let old_4 = ColumnId::new(old, 4).expect("valid index");
+        assert_eq!(reopened.get(&old_0).expect("get"), None);
+        assert_eq!(reopened.get(&old_4).expect("get"), None);
+        assert_eq!(
+            reopened
+                .availability(old)
+                .expect("availability")
+                .held_count(),
+            0,
+            "no availability bits survive for a pruned block"
+        );
+
+        // Everything at or above the floor is untouched by the round trip.
+        let recent_1 = ColumnId::new(recent, 1).expect("valid index");
+        assert!(reopened.get(&recent_1).expect("get").is_some());
+        assert_eq!(
+            reopened
+                .availability(recent)
+                .expect("availability")
+                .held_count(),
+            1
+        );
 
         fs::remove_dir_all(&root).ok();
     }

@@ -15,7 +15,7 @@ pub struct DataColumnSidecarTable {
 /// Value: opaque column payload bytes
 impl REDBTable for DataColumnSidecarTable {
     const TABLE_DEFINITION: TableDefinition<'_, (SSZEncoding<B256>, u64), SSZEncoding<Vec<u8>>> =
-        TableDefinition::new("da_column_sidecar");
+        TableDefinition::new("data_availability_column_sidecar");
 
     type Key = (B256, u64);
 

@@ -8,12 +8,12 @@ pub struct RetentionFloorField {
     pub db: Arc<Database>,
 }
 
-/// Field definition for the DA retention floor
+/// Field definition for the data availability retention floor
 ///
 /// Value: the lowest slot whose columns are still retained.
 impl REDBField for RetentionFloorField {
     const FIELD_DEFINITION: TableDefinition<'_, &str, u64> =
-        TableDefinition::new("da_retention_floor");
+        TableDefinition::new("data_availability_retention_floor");
 
     const KEY: &str = "retention_floor";
 

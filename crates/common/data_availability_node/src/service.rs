@@ -484,7 +484,7 @@ mod tests {
     use super::DataAvailabilityVerificationService;
     use crate::{
         ingest::{RetentionHint, ingest_channel},
-        test_store::DaMemoryStore,
+        test_store::MemoryColumnStore,
     };
 
     /// Pass-through verifier: these tests exercise the queue-to-store
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn submitted_candidates_are_verified_and_stored() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(AcceptAllVerifier);
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -576,7 +576,7 @@ mod tests {
     #[test]
     fn retention_hint_prunes_columns_below_the_boundary() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(AcceptAllVerifier);
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn submitted_block_batch_is_verified_and_stored() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn block_batch_skips_already_held_columns() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn block_batch_stores_survivors_when_some_columns_are_rejected() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(CountingVerifier::rejecting(vec![3]));
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn below_floor_candidate_is_skipped_before_verification() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let (handle, rx) = ingest_channel(8);
         let service = DataAvailabilityVerificationService::new(
@@ -858,7 +858,7 @@ mod tests {
     }
 
     /// Poll until the block holds every column or a deadline passes.
-    async fn wait_until_complete(store: &DaMemoryStore, block_root: B256) {
+    async fn wait_until_complete(store: &MemoryColumnStore, block_root: B256) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let held = store
@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn incomplete_block_self_heals_through_the_verify_gate() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let reconstructor = FillMissingReconstructor::new();
         let (handle, rx) = ingest_channel(8);
@@ -924,7 +924,7 @@ mod tests {
     #[test]
     fn a_trickled_column_crossing_the_threshold_triggers_recovery() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let reconstructor = FillMissingReconstructor::new();
         let (handle, rx) = ingest_channel(8);
@@ -966,7 +966,7 @@ mod tests {
     #[test]
     fn reconstruction_stands_down_when_the_block_completes_naturally() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let reconstructor = FillMissingReconstructor::new();
         let (handle, rx) = ingest_channel(8);
@@ -1013,7 +1013,7 @@ mod tests {
     #[test]
     fn no_reconstruction_below_half_the_columns() {
         let executor = ReamExecutor::new().expect("create executor");
-        let store = Arc::new(DaMemoryStore::new());
+        let store = Arc::new(MemoryColumnStore::new());
         let verifier = Arc::new(CountingVerifier::accepting_all());
         let reconstructor = FillMissingReconstructor::new();
         let (handle, rx) = ingest_channel(8);

@@ -13,4 +13,4 @@ use crate::tables::ssz_encoder::SSZEncoding;
 pub(crate) const DATA_AVAILABILITY_SLOT_INDEX_MULTIMAP_TABLE: MultimapTableDefinition<
     u64,
     SSZEncoding<B256>,
-> = MultimapTableDefinition::new("da_slot_index_multimap");
+> = MultimapTableDefinition::new("data_availability_slot_index_multimap");
