@@ -31,8 +31,9 @@ fn backend(err: impl Display) -> ColumnStoreError {
     ColumnStoreError::Backend(err.to_string())
 }
 
-/// redb-backed data availability store. Only [`crate::db::ReamDB::init_data_availability_db`] constructs
-/// one, so holding a `DataAvailabilityDB` proves every data availability table exists in the database.
+/// redb-backed data availability store. Only [`crate::db::ReamDB::init_data_availability_db`]
+/// constructs one, so holding a `DataAvailabilityDB` proves every data availability table exists
+/// in the database.
 #[derive(Clone, Debug)]
 pub struct DataAvailabilityDB {
     pub db: Arc<Database>,

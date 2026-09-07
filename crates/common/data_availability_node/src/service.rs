@@ -491,7 +491,8 @@ mod tests {
     };
 
     /// Pass-through verifier: these tests exercise the queue-to-store
-    /// plumbing, not the cryptography (tested in `ream-data-availabilityta-availabilityta-availability-verifier-kzg`).
+    /// plumbing, not the cryptography (tested in
+    /// `ream-data-availabilityta-availabilityta-availability-verifier-kzg`).
     struct AcceptAllVerifier;
 
     impl ColumnVerifier for AcceptAllVerifier {
